@@ -75,6 +75,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "voice": "en-IN-NeerjaExpressiveNeural",  # natural, expressive Indian female voice
         "fallback_voice": "en-IN-NeerjaNeural",
+        "hindi_voice": "hi-IN-SwaraNeural",  # speaks replies containing Hindi (Devanagari) words
         "rate": "+0%",               # speed, e.g. "+15%" faster, "-10%" slower
         "pitch": "+0Hz",
         "volume": "+0%",

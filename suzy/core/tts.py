@@ -45,14 +45,20 @@ class SynthesisError(RuntimeError):
 class Synthesizer(Protocol):
     name: str
 
-    def synthesize(self, text: str) -> tuple[np.ndarray, int]:
-        """Return (mono float32 samples, sample rate). Raises SynthesisError."""
+    def synthesize(self, text: str, voice: str | None = None) -> tuple[np.ndarray, int]:
+        """Return (mono float32 samples, sample rate). ``voice`` overrides the default
+        (e.g. the Hindi voice for Devanagari text). Raises SynthesisError."""
 
 
 # =========================================================================== text prep
 _MARKDOWN = re.compile(r"(\*\*|__|`+|^#+\s*|^\s*[-*]\s+)", re.MULTILINE)
 _URL = re.compile(r"https?://\S+|www\.\S+")
 _SENTENCE_END = re.compile(r"(?<=[.!?।])\s+")
+
+
+def has_devanagari(text: str) -> bool:
+    """True if the text contains Hindi (Devanagari) characters."""
+    return any("\u0900" <= ch <= "\u097f" for ch in text)
 
 
 def clean_for_speech(text: str) -> str:
@@ -163,13 +169,14 @@ class EdgeSynthesizer:
         except (edge_errors.EdgeTTSException, ValueError) as exc:
             raise SynthesisError(f"voice service error: {exc}") from exc
 
-    def synthesize(self, text: str) -> tuple[np.ndarray, int]:
+    def synthesize(self, text: str, voice: str | None = None) -> tuple[np.ndarray, int]:
+        voice = voice or self.voice
         try:
-            mp3 = self._fetch_sync(text, self.voice)
+            mp3 = self._fetch_sync(text, voice)
         except SynthesisError as exc:
-            if exc.network or not self.fallback_voice or self.fallback_voice == self.voice:
+            if exc.network or not self.fallback_voice or self.fallback_voice == voice:
                 raise
-            log.warning("Voice %s failed (%s); trying %s", self.voice, exc, self.fallback_voice)
+            log.warning("Voice %s failed (%s); trying %s", voice, exc, self.fallback_voice)
             mp3 = self._fetch_sync(text, self.fallback_voice)
         if not mp3:
             raise SynthesisError("the voice service returned no audio")
@@ -195,11 +202,13 @@ class OfflineSynthesizer:
 
     name = "offline"
     PREFERRED_VOICES = ("heera", "zira", "female")  # Indian English female first
+    HINDI_VOICES = ("kalpana", "swara", "hindi", "hemant")  # Windows Hindi voices, if installed
 
     def __init__(self, rate_percent: int = 0) -> None:
         self.rate_percent = rate_percent
 
-    def synthesize(self, text: str) -> tuple[np.ndarray, int]:
+    def synthesize(self, text: str, voice: str | None = None) -> tuple[np.ndarray, int]:
+        hindi = bool(voice and voice.startswith("hi-")) or has_devanagari(text)
         try:
             import pyttsx3
         except ImportError as exc:
@@ -216,7 +225,7 @@ class OfflineSynthesizer:
         try:
             engine = pyttsx3.init()
             try:
-                self._pick_voice(engine)
+                self._pick_voice(engine, hindi)
                 base_rate = engine.getProperty("rate") or 200
                 engine.setProperty("rate", int(base_rate * (1 + self.rate_percent / 100)))
                 engine.save_to_file(text, path)
@@ -234,9 +243,10 @@ class OfflineSynthesizer:
             except OSError:
                 pass
 
-    def _pick_voice(self, engine: Any) -> None:
+    def _pick_voice(self, engine: Any, hindi: bool = False) -> None:
         voices = engine.getProperty("voices") or []
-        for wanted in self.PREFERRED_VOICES:
+        wanted_order = (self.HINDI_VOICES + self.PREFERRED_VOICES) if hindi else self.PREFERRED_VOICES
+        for wanted in wanted_order:
             for voice in voices:
                 label = f"{getattr(voice, 'name', '')} {getattr(voice, 'id', '')}".lower()
                 if wanted in label or (wanted == "female" and getattr(voice, "gender", "") == "female"):
@@ -266,8 +276,9 @@ def read_wav(path: str) -> tuple[np.ndarray, int]:
 @dataclass
 class TTSSettings:
     enabled: bool = True
-    voice: str = "en-IN-NeerjaNeural"
-    fallback_voice: str = "en-US-AriaNeural"
+    voice: str = "en-IN-NeerjaExpressiveNeural"
+    fallback_voice: str = "en-IN-NeerjaNeural"
+    hindi_voice: str | None = "hi-IN-SwaraNeural"  # speaks any reply that contains Hindi (Devanagari)
     rate: str = "+0%"
     pitch: str = "+0Hz"
     volume: str = "+0%"
@@ -292,6 +303,7 @@ class TTSSettings:
             pitch=safe(normalize_pitch, "tts.pitch", defaults.pitch),
             volume=safe(normalize_rate, "tts.volume", defaults.volume),
             offline_fallback=bool(config.get("tts.offline_fallback", True)),
+            hindi_voice=config.get("tts.hindi_voice", defaults.hindi_voice) or None,
         )
 
 
@@ -342,11 +354,16 @@ class TextToSpeech:
         self._stop.set()
         self.player.stop()
 
+    def voice_for(self, text: str) -> str | None:
+        """The Hindi voice for text containing Hindi script (None = the normal voice)."""
+        return self.settings.hindi_voice if self.settings.hindi_voice and has_devanagari(text) else None
+
     def _synthesize(self, text: str) -> tuple[np.ndarray, int] | None:
         """Synthesize one chunk, falling back to the offline voice. Returns None on failure."""
+        voice = self.voice_for(text)
         if time.monotonic() >= self._primary_down_until:
             try:
-                return self.primary.synthesize(text)
+                return self.primary.synthesize(text, voice) if voice else self.primary.synthesize(text)
             except SynthesisError as exc:
                 self.last_error = str(exc)
                 log.warning("%s voice failed: %s", self.primary.name, exc)
@@ -358,7 +375,7 @@ class TextToSpeech:
                                        "Windows voice. The natural voice comes back by itself when it can.")
         if self.offline is not None:
             try:
-                return self.offline.synthesize(text)
+                return self.offline.synthesize(text, voice) if voice else self.offline.synthesize(text)
             except SynthesisError as exc:
                 self.last_error = str(exc)
                 log.warning("Offline voice failed: %s", exc)

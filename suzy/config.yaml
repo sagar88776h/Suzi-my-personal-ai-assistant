@@ -53,6 +53,7 @@ tts:                      # Suzy's voice
   enabled: true
   voice: en-IN-NeerjaExpressiveNeural  # hear all voices: double-click "Suzy Voices" (or: main.py --voices)
   fallback_voice: en-IN-NeerjaNeural
+  hindi_voice: hi-IN-SwaraNeural  # reads replies with Hindi words (null = always use the voice above)
   rate: "+0%"             # speed: "+15%" faster, "-10%" slower
   pitch: "+0Hz"           # "+5Hz" higher, "-5Hz" lower
   volume: "+0%"

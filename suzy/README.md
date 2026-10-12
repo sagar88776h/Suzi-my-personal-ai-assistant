@@ -152,6 +152,12 @@ To hear all the options and pick your favourite, double-click **Suzy Voices** on
 desktop (or run `python main.py --voices`). You can also just tell her: *"Suzy, change
 your voice to Swara"*, *"speak a little faster"*, or *"lower your pitch a bit"*.
 
+**Hindi and Hinglish:** when you talk to her in Hindi or Hinglish, she replies in Hinglish
+with the Hindi words written in Hindi script (e.g. "Volume कम कर दिया"), and those replies
+are spoken by a Hindi voice (`hi-IN-SwaraNeural`, set by `tts.hindi_voice`) so the Hindi
+words are pronounced properly. English replies keep your main voice. (If Hindi letters show
+as boxes in the window, open Suzy in *Windows Terminal*, which has Hindi fonts.)
+
 **Speed:** your speech is turned into text by Groq's cloud Whisper (about half a second,
 free with the same key, very good at Hindi and Hinglish). Your PC's own model takes over
 automatically when you're offline. Simple actions are answered straight away, e.g.

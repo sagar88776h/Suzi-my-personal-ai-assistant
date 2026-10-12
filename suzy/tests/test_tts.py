@@ -176,7 +176,7 @@ class FakeSynth:
     def __init__(self, name="fake", fail_with=None, delay=0.0):
         self.name, self.fail_with, self.delay, self.texts = name, fail_with, delay, []
 
-    def synthesize(self, text):
+    def synthesize(self, text, voice=None):
         self.texts.append(text)
         time.sleep(self.delay)
         if self.fail_with is not None:
@@ -301,3 +301,71 @@ def test_disabled_and_empty():
     assert make_tts(primary, enabled=False).speak("hi") is False
     assert make_tts(primary).speak("   ") is True
     assert primary.texts == []
+
+
+# ----------------------------------------------------------------- Hindi voice routing
+class VoiceRecordingSynth:
+    name = "edge"
+
+    def __init__(self):
+        self.voices = []
+
+    def synthesize(self, text, voice=None):
+        self.voices.append(voice)
+        return np.zeros(100, np.float32), 24_000
+
+
+def test_hindi_text_uses_the_hindi_voice():
+    from core.tts import has_devanagari
+
+    primary = VoiceRecordingSynth()
+    speaker = make_tts(primary)
+    speaker.speak("Volume कम कर दिया, Sagar. और कुछ?")
+    speaker.speak("Opening Notepad.")
+    assert primary.voices == ["hi-IN-SwaraNeural", None]   # None = the normal (English) voice
+    assert has_devanagari("कम") and not has_devanagari("kam karo")
+
+
+def test_hindi_voice_can_be_switched_off():
+    primary = VoiceRecordingSynth()
+    make_tts(primary, hindi_voice=None).speak("Volume कम कर दिया।")
+    assert primary.voices == [None]
+
+
+def test_hindi_voice_is_used_by_the_offline_fallback_too():
+    offline = VoiceRecordingSynth()
+    speaker = make_tts(FakeSynth(fail_with=SynthesisError("offline", network=True)), offline)
+    speaker.speak("Volume कम कर दिया।")
+    assert offline.voices == ["hi-IN-SwaraNeural"]
+
+
+def test_edge_synthesizer_uses_the_requested_voice(monkeypatch):
+    asked = []
+    monkeypatch.setattr(EdgeSynthesizer, "_fetch_sync", lambda self, text, voice: asked.append(voice) or _mp3_tone())
+    synth = EdgeSynthesizer("en-IN-NeerjaExpressiveNeural")
+    synth.synthesize("hello")
+    synth.synthesize("नमस्ते", voice="hi-IN-SwaraNeural")
+    assert asked == ["en-IN-NeerjaExpressiveNeural", "hi-IN-SwaraNeural"]
+
+
+def test_offline_voice_prefers_windows_hindi_voices():
+    from types import SimpleNamespace
+
+    from core.tts import OfflineSynthesizer
+
+    class Engine:
+        def __init__(self):
+            self.chosen = None
+
+        def getProperty(self, name):  # noqa: N802 - pyttsx3 API
+            return [SimpleNamespace(name="Microsoft Zira", id="zira"),
+                    SimpleNamespace(name="Microsoft Kalpana", id="kalpana")]
+
+        def setProperty(self, name, value):  # noqa: N802
+            self.chosen = value
+
+    engine = Engine()
+    OfflineSynthesizer()._pick_voice(engine, hindi=True)
+    assert engine.chosen == "kalpana"
+    OfflineSynthesizer()._pick_voice(engine, hindi=False)
+    assert engine.chosen == "zira"
