@@ -72,7 +72,7 @@ def startup_report(config: Config, router: LLMRouter) -> list[str]:
 def greeting(config: Config, now: datetime | None = None) -> str:
     hour = (now or datetime.now()).hour
     part = "morning" if 5 <= hour < 12 else "afternoon" if 12 <= hour < 17 else "evening"
-    return f"Good {part}, {config.get('user.name', 'Sourab')}. Suzy here - what can I do for you?"
+    return f"Good {part}, {config.get('user.name', 'Sagar')}. Suzy here - what can I do for you?"
 
 
 def print_reply(reply: AssistantReply, show_actions: bool) -> None:

@@ -65,7 +65,7 @@ class Assistant:
     def system_prompt(self) -> str:
         return build_system_prompt(
             assistant_name=self.config.get("assistant.name", "Suzy"),
-            user_name=self.config.get("user.name", "Sourab"),
+            user_name=self.config.get("user.name", "Sagar"),
             now=self.clock(),
         )
 

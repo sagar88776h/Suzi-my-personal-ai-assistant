@@ -60,13 +60,13 @@ def make(llm, reg, **config):
 
 
 def test_plain_chat(reg):
-    llm = FakeLLM(text("Hey Sourab!"))
+    llm = FakeLLM(text("Hey Sagar!"))
     assistant = make(llm, reg)
     reply = assistant.process("hello")
-    assert reply.text == "Hey Sourab!" and reply.actions == [] and not reply.error
+    assert reply.text == "Hey Sagar!" and reply.actions == [] and not reply.error
     assert assistant.history == [{"role": "user", "content": "hello"},
-                                 {"role": "assistant", "content": "Hey Sourab!"}]
-    assert "Sourab" in llm.prompts[0] and "3:45 PM" in llm.prompts[0]
+                                 {"role": "assistant", "content": "Hey Sagar!"}]
+    assert "Sagar" in llm.prompts[0] and "3:45 PM" in llm.prompts[0]
 
 
 def test_tool_loop(reg):

@@ -28,7 +28,7 @@ log = logging.getLogger("suzy.config")
 # Built-in defaults. config.yaml only needs to contain the values you change.
 DEFAULT_CONFIG: dict[str, Any] = {
     "user": {
-        "name": "Sourab",
+        "name": "Sagar",
     },
     "assistant": {
         "name": "Suzy",

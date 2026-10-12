@@ -70,9 +70,9 @@ def make_groq(client) -> GroqProvider:
 
 
 def test_groq_text_reply_and_request_shape():
-    client = FakeGroqClient(reply=groq_reply("Hello Sourab!"))
+    client = FakeGroqClient(reply=groq_reply("Hello Sagar!"))
     response = make_groq(client).chat(CONVERSATION, TOOLS, "SYSTEM")
-    assert response == LLMResponse("Hello Sourab!", [], "groq")
+    assert response == LLMResponse("Hello Sagar!", [], "groq")
 
     sent = client.calls[0]
     assert sent["model"] == "llama-3.3-70b-versatile" and sent["tool_choice"] == "auto"
@@ -172,9 +172,9 @@ def test_gemini_reuses_raw_content():
 
 def test_gemini_text_reply_and_config():
     client = FakeGeminiClient(gemini_response(types.Part(text="thinking...", thought=True),
-                                              types.Part(text="Namaste Sourab!")))
+                                              types.Part(text="Namaste Sagar!")))
     response = make_gemini(client).chat(CONVERSATION[:1], TOOLS, "SYSTEM")
-    assert response.text == "Namaste Sourab!" and response.tool_calls == [] and response.message_extras == {}
+    assert response.text == "Namaste Sagar!" and response.tool_calls == [] and response.message_extras == {}
     config = client.calls[0]["config"]
     assert config.system_instruction == "SYSTEM"
     assert config.automatic_function_calling.disable is True

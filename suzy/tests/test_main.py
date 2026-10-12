@@ -11,7 +11,7 @@ from core.llm import GeminiProvider, GroqProvider, LLMRouter
 
 def test_greeting_by_time_of_day():
     config = Config()
-    assert main.greeting(config, datetime(2026, 1, 1, 8)).startswith("Good morning, Sourab.")
+    assert main.greeting(config, datetime(2026, 1, 1, 8)).startswith("Good morning, Sagar.")
     assert main.greeting(config, datetime(2026, 1, 1, 14)).startswith("Good afternoon")
     assert main.greeting(config, datetime(2026, 1, 1, 22)).startswith("Good evening")
 

@@ -5,7 +5,7 @@
 # ---------------------------------------------------------------------------
 
 user:
-  name: Sourab            # how Suzy addresses you
+  name: Sagar             # how Suzy addresses you
 
 assistant:
   name: Suzy

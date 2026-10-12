@@ -23,9 +23,9 @@ def test_deep_merge_does_not_mutate():
 
 def test_load_yaml_overrides(tmp_path):
     path = tmp_path / "config.yaml"
-    path.write_text("user:\n  name: Sourab K\nllm:\n  provider: gemini\n", encoding="utf-8")
+    path.write_text("user:\n  name: Sagar K\nllm:\n  provider: gemini\n", encoding="utf-8")
     config = Config.load(path, tmp_path / ".env")
-    assert config.get("user.name") == "Sourab K"
+    assert config.get("user.name") == "Sagar K"
     assert config.get("llm.provider") == "gemini"
     assert config.get("llm.fallback_provider") == "gemini"  # default kept
     assert config.load_errors == []
