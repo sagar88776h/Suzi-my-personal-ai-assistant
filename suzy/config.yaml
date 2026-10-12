@@ -15,7 +15,7 @@ assistant:
   startup_greeting: "Hello {name}, welcome back."  # said when Suzy starts with Windows
 
 llm:
-  provider: groq          # primary brain: groq | gemini
+  provider: groq          # primary brain: groq | ollama | gemini
   fallback_provider: gemini
   temperature: 0.6
   max_tokens: 2048
@@ -26,6 +26,12 @@ llm:
       - openai/gpt-oss-120b
       - openai/gpt-oss-20b
     reasoning_effort: low # gpt-oss "thinking" effort: low | medium | high
+  ollama:                 # Ollama Cloud (key: OLLAMA_API_KEY in .env) or Ollama on this PC
+    host: https://ollama.com   # for Ollama on this PC: http://localhost:11434 (no key needed)
+    models:
+      - gpt-oss:120b
+      - gpt-oss:20b
+    think: low
   gemini:
     models:
       - gemini-flash-latest

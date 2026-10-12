@@ -217,6 +217,23 @@ All tests should pass. They mock anything that would really change your PC.
 
 ---
 
+### Optional: Ollama as a brain
+
+Suzy can also think with **Ollama**, either **Ollama Cloud** (create an API key at
+<https://ollama.com/settings/keys>) or **Ollama running on this PC** (no key needed).
+
+- **Ollama Cloud:** the installer asks for the key (optional), or add `OLLAMA_API_KEY=...`
+  to `.env` yourself. With a key, Suzy automatically uses Ollama as an extra backup brain.
+  To make it the **main** brain, set `llm.provider: ollama` in `config.yaml`.
+- **Ollama on this PC:** install Ollama from <https://ollama.com/download>, run
+  `ollama pull qwen3:8b` (or any model with tool support), then in `config.yaml` set
+  `llm.provider: ollama`, `llm.ollama.host: http://localhost:11434` and
+  `llm.ollama.models: [qwen3:8b]`. It's private and works offline, but it's slower than the
+  cloud unless you have a strong graphics card.
+
+Keep your **Groq key** if you can: besides being a brain, it powers Suzy's fast speech
+recognition. Without it, listening uses the slower model on your PC.
+
 ## 2. Configuration
 
 * **`config.yaml`**: every setting, with a comment on each one. This is where

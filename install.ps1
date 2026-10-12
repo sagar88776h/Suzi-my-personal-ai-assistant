@@ -27,6 +27,12 @@ function Write-Step($text)  { Write-Host ""; Write-Host "==> $text" -ForegroundC
 function Write-Ok($text)    { Write-Host "    $text" -ForegroundColor Green }
 function Write-Note($text)  { Write-Host "    $text" -ForegroundColor Yellow }
 
+function Confirm-No($question) {
+    # Returns $true only if the user types y / yes.
+    $answer = Read-Host "    $question (y/N)"
+    return ($answer -match '^\s*(y|yes|haan|ha)\s*$')
+}
+
 function Confirm-Default($question) {
     # Returns $true unless the user types n / no.
     $answer = Read-Host "    $question (Y/n)"
@@ -101,16 +107,28 @@ function Read-EnvFile($path) {
     return $values
 }
 
-function Write-EnvFile($path, $groqKey, $geminiKey) {
-    $text = @(
-        '# Suzy API keys - keep this file private.',
-        '# Groq (primary brain): https://console.groq.com/keys',
-        "GROQ_API_KEY=$groqKey",
-        '',
-        '# Google Gemini (backup brain): https://aistudio.google.com/apikey',
-        "GEMINI_API_KEY=$geminiKey",
-        ''
-    ) -join "`r`n"
+function Write-EnvFile($path, $values) {
+    # Known keys with their comments, then every other entry already in the file (never lost).
+    $known = @(
+        @('GROQ_API_KEY', '# Groq (main brain + fast speech recognition): https://console.groq.com/keys'),
+        @('GEMINI_API_KEY', '# Google Gemini (backup brain): https://aistudio.google.com/apikey'),
+        @('OLLAMA_API_KEY', '# Ollama Cloud (optional brain): https://ollama.com/settings/keys')
+    )
+    $lines = @('# Suzy API keys - keep this file private.')
+    foreach ($entry in $known) {
+        $lines += ''
+        $lines += $entry[1]
+        $lines += "$($entry[0])=$($values[$entry[0]])"
+    }
+    $knownNames = $known | ForEach-Object { $_[0] }
+    $others = @($values.Keys | Where-Object { $knownNames -notcontains $_ } | Sort-Object)
+    if ($others.Count -gt 0) {
+        $lines += ''
+        $lines += '# Other settings'
+        foreach ($name in $others) { $lines += "$name=$($values[$name])" }
+    }
+    $lines += ''
+    $text = $lines -join "`r`n"
     # UTF-8 *without* BOM: a BOM would corrupt the first key name for python-dotenv.
     [IO.File]::WriteAllText($path, $text, (New-Object Text.UTF8Encoding $false))
 }
@@ -120,9 +138,10 @@ function Request-ApiKey($label, $url, $prefix) {
     Write-Host "    $label - free key at: $url" -ForegroundColor White
     if (Confirm-Default "Open that page in your browser now?") { Start-Process $url }
     # $prefix may list several accepted prefixes separated by " or ".
-    $key = (Read-Host "    Paste your $label key here (starts with $prefix), or just press Enter to skip").Trim().Trim('"').Trim("'")
+    $hint = if ($prefix) { " (starts with $prefix)" } else { "" }
+    $key = (Read-Host "    Paste your $label key here$hint, or just press Enter to skip").Trim().Trim('"').Trim("'")
     $known = @($prefix -split ' or ' | Where-Object { $key.StartsWith($_) })
-    if ($key -and $known.Count -eq 0) {
+    if ($key -and $prefix -and $known.Count -eq 0) {
         Write-Note "That doesn't start with $prefix - saving it anyway, double-check it if Suzy complains."
     }
     return $key
@@ -226,17 +245,26 @@ function Install-Suzy {
     # 4. API keys ----------------------------------------------------------
     Write-Step "Step 4/6: API keys (both are free, no credit card)"
     $envPath = Join-Path $InstallDir '.env'
-    $existing = Read-EnvFile $envPath
-    $groqKey = $existing['GROQ_API_KEY']
-    $geminiKey = $existing['GEMINI_API_KEY']
-    if ($groqKey -and $geminiKey) {
-        Write-Ok "Found your saved Groq and Gemini keys."
-        if (-not (Confirm-Default "Keep them?")) { $groqKey = ''; $geminiKey = '' }
+    $keys = Read-EnvFile $envPath
+    if ($keys['GROQ_API_KEY'] -and $keys['GEMINI_API_KEY']) {
+        Write-Ok "Found your saved keys."
+        if (-not (Confirm-Default "Keep them?")) { $keys['GROQ_API_KEY'] = ''; $keys['GEMINI_API_KEY'] = '' }
     }
-    if (-not $groqKey)   { $groqKey   = Request-ApiKey 'Groq (main brain)' 'https://console.groq.com/keys' 'gsk_' }
-    if (-not $geminiKey) { $geminiKey = Request-ApiKey 'Google Gemini (backup brain)' 'https://aistudio.google.com/apikey' 'AIza or AQ.' }
-    Write-EnvFile $envPath $groqKey $geminiKey
-    if (-not $groqKey -and -not $geminiKey) {
+    if (-not $keys['GROQ_API_KEY']) {
+        $keys['GROQ_API_KEY'] = Request-ApiKey 'Groq (main brain + fast listening)' 'https://console.groq.com/keys' 'gsk_'
+    }
+    if (-not $keys['GEMINI_API_KEY']) {
+        $keys['GEMINI_API_KEY'] = Request-ApiKey 'Google Gemini (backup brain)' 'https://aistudio.google.com/apikey' 'AIza or AQ.'
+    }
+    if ($keys['OLLAMA_API_KEY']) {
+        Write-Ok "Found your Ollama Cloud key too."
+    } elseif (Confirm-No "Do you also have an Ollama Cloud API key to add (optional)?") {
+        $keys['OLLAMA_API_KEY'] = Request-ApiKey 'Ollama Cloud (extra brain)' 'https://ollama.com/settings/keys' ''
+    }
+    $groqKey = $keys['GROQ_API_KEY']
+    $geminiKey = $keys['GEMINI_API_KEY']
+    Write-EnvFile $envPath $keys
+    if (-not $groqKey -and -not $geminiKey -and -not $keys['OLLAMA_API_KEY']) {
         Write-Note "No keys saved - Suzy can't think without one. Re-run this installer or edit $envPath later."
     } else {
         Write-Ok "Keys saved to $envPath"

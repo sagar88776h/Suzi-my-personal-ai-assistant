@@ -505,9 +505,109 @@ class GeminiProvider(BaseProvider):
         )
 
 
+class OllamaProvider(BaseProvider):
+    """Ollama's native chat API - Ollama Cloud (https://ollama.com, needs OLLAMA_API_KEY)
+    or a local Ollama on this PC (http://localhost:11434, no key)."""
+
+    name = "ollama"
+
+    def __init__(self, *args: Any, host: str = "https://ollama.com", think: str | None = "low",
+                 **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.host = host.rstrip("/")
+        self.think = think
+
+    @property
+    def is_local(self) -> bool:
+        return any(name in self.host for name in ("localhost", "127.0.0.1", "[::1]"))
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.api_key) or self.is_local
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            import httpx
+
+            self._client = httpx.Client(timeout=self.timeout)
+        return self._client
+
+    @staticmethod
+    def convert_messages(messages: list[dict[str, Any]], system_prompt: str) -> list[dict[str, Any]]:
+        converted: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+        for message in messages:
+            role = message.get("role")
+            if role == "user":
+                converted.append({"role": "user", "content": message.get("content") or ""})
+            elif role == "assistant":
+                item: dict[str, Any] = {"role": "assistant", "content": message.get("content") or ""}
+                calls = [{"function": {"name": call.get("function", {}).get("name"),
+                                       "arguments": _parse_arguments(call.get("function", {}).get("arguments"))}}
+                         for call in message.get("tool_calls") or []]
+                if calls:
+                    item["tool_calls"] = calls
+                converted.append(item)
+            elif role == "tool":
+                converted.append({"role": "tool", "content": message.get("content") or "",
+                                  "tool_name": message.get("name") or ""})
+        return converted
+
+    def _classify(self, status: int, body: str) -> LLMError:
+        lowered = body.lower()
+        if status in (401, 403):
+            kind = LLMErrorKind.AUTH
+        elif status == 429:
+            kind = LLMErrorKind.RATE_LIMIT
+        elif status == 404 or (status == 400 and _mentions_missing_model(lowered)):
+            kind = LLMErrorKind.MODEL_UNAVAILABLE
+        elif status >= 500:
+            kind = LLMErrorKind.SERVER
+        else:
+            kind = LLMErrorKind.BAD_REQUEST
+        return LLMError(self.name, kind, f"HTTP {status}: {body[:400]}")
+
+    def _chat_with_model(self, model: str, messages: list[dict[str, Any]],
+                         tools: list[dict[str, Any]], system_prompt: str,
+                         options: dict[str, Any]) -> LLMResponse:
+        import httpx
+
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": self.convert_messages(messages, system_prompt),
+            "stream": False,
+            "options": {"temperature": self.temperature,
+                        "num_predict": int(options.get("max_tokens", self.max_tokens))},
+        }
+        if tools:
+            body["tools"] = [{"type": "function", "function": t} for t in tools]
+        effort = options.get("reasoning_effort", self.think)
+        if effort and "gpt-oss" in model:
+            body["think"] = effort  # gpt-oss: low / medium / high
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        try:
+            response = self._get_client().post(f"{self.host}/api/chat", json=body, headers=headers)
+        except (httpx.TransportError, OSError) as exc:
+            hint = " (is Ollama running on this PC?)" if self.is_local else ""
+            raise LLMError(self.name, LLMErrorKind.NETWORK, f"{exc}{hint}") from exc
+        if response.status_code >= 400:
+            raise self._classify(response.status_code, response.text)
+        try:
+            message = response.json().get("message") or {}
+        except ValueError as exc:
+            raise LLMError(self.name, LLMErrorKind.UNKNOWN, "Ollama sent a reply I couldn't read") from exc
+        calls = []
+        for call in message.get("tool_calls") or []:
+            function = call.get("function") or {}
+            calls.append(ToolCall(id=call.get("id") or f"call_{uuid.uuid4().hex[:12]}",
+                                  name=function.get("name") or "",
+                                  arguments=_parse_arguments(function.get("arguments"))))
+        return LLMResponse(text=(message.get("content") or "").strip(), tool_calls=calls, provider=self.name)
+
+
 PROVIDER_CLASSES: dict[str, type[BaseProvider]] = {
     "groq": GroqProvider,
     "gemini": GeminiProvider,
+    "ollama": OllamaProvider,
 }
 
 
@@ -535,6 +635,9 @@ def build_provider(name: str, config: Config) -> BaseProvider:
         return GeminiProvider(thinking_budget=config.get("llm.gemini.thinking_budget"), **common)
     if cls is GroqProvider:
         return GroqProvider(reasoning_effort=config.get("llm.groq.reasoning_effort", "low"), **common)
+    if cls is OllamaProvider:
+        return OllamaProvider(host=str(config.get("llm.ollama.host", "https://ollama.com")),
+                              think=config.get("llm.ollama.think", "low"), **common)
     return cls(**common)
 
 
@@ -584,9 +687,13 @@ class LLMRouter:
 
     @classmethod
     def from_config(cls, config: Config) -> LLMRouter:
+        """Providers in config order (provider, then fallback_provider - a name or a list),
+        followed by any other provider that has a key, so adding a key is enough to use it."""
         order: list[str] = []
-        for key in ("llm.provider", "llm.fallback_provider"):
-            name = str(config.get(key) or "").strip().lower()
+        fallback = config.get("llm.fallback_provider")
+        names = [config.get("llm.provider")] + (fallback if isinstance(fallback, list) else [fallback])
+        for value in names:
+            name = str(value or "").strip().lower()
             if name and name not in order:
                 order.append(name)
         providers = []
@@ -595,6 +702,11 @@ class LLMRouter:
                 providers.append(build_provider(name, config))
             except ValueError as exc:
                 log.error("%s", exc)
+        for name in PROVIDER_CLASSES:
+            if name not in order:
+                extra = build_provider(name, config)
+                if extra.is_configured:
+                    providers.append(extra)
         return cls(providers)
 
     @property

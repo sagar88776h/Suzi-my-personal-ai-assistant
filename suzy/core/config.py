@@ -49,6 +49,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
             "reasoning_effort": "low",   # gpt-oss only: low | medium | high
         },
+        "ollama": {
+            "host": "https://ollama.com",     # Ollama Cloud; "http://localhost:11434" for Ollama on this PC
+            "models": ["gpt-oss:120b", "gpt-oss:20b"],
+            "think": "low",                   # gpt-oss thinking effort: low | medium | high
+        },
         "gemini": {
             "models": ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash"],
             "thinking_budget": None,     # None = model default; 0 disables thinking on 2.5 models
@@ -119,6 +124,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 API_KEY_ENV_VARS: dict[str, tuple[str, ...]] = {
     "groq": ("GROQ_API_KEY",),
     "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "ollama": ("OLLAMA_API_KEY",),
 }
 
 
