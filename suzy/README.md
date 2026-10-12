@@ -12,7 +12,27 @@ system, and plenty more as the build goes on. She understands English and Hingli
 
 ---
 
-## 1. Setup, step by step (for beginners)
+## 1. Easiest: one-command install
+
+Open **PowerShell**: press the Windows key, type `powershell`, and press Enter.
+Paste this line and press Enter:
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://raw.githubusercontent.com/sagar88776h/Suzi-my-personal-ai-assistant/refs/heads/claude/youthful-sagan-m97rqy/install.ps1 | iex"
+```
+
+The installer does everything for you. It installs Python if you don't have it,
+downloads Suzy into `C:\Users\<you>\Suzy`, installs the libraries, asks you to
+paste your free API keys (and opens the pages where you get them), runs the
+self-tests, puts a **Suzy** shortcut on your desktop, and starts Suzy. No admin
+rights are needed.
+
+After that, just double-click **Suzy** on your desktop. To update Suzy later, run
+the same command again. Your keys and settings are kept.
+
+If you'd rather do it by hand, follow the manual steps below.
+
+## 1b. Manual setup, step by step
 
 You only need to do this once. Run the commands in **PowerShell**: press the
 Windows key, type `powershell`, and press Enter.
