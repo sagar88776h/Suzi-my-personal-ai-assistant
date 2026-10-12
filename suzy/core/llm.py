@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -104,6 +105,12 @@ class LLMUnavailableError(Exception):
                     "to update me, or set a current model in config.yaml.")
         return "My brain is having trouble right now. Please try again in a moment."
 
+    def retry_after(self) -> float | None:
+        """Seconds until a rate limit resets, if the provider said so ("try again in 1m7.5s")."""
+        waits = [parse_retry_after(e.detail) for e in self.errors if e.kind is LLMErrorKind.RATE_LIMIT]
+        known = [w for w in waits if w is not None]
+        return min(known) if known else None
+
     def technical_summary(self, max_len: int = 160) -> str:
         """One short line per provider with the last error it reported."""
         latest: dict[str, LLMError] = {}
@@ -131,6 +138,20 @@ def _parse_arguments(raw: Any) -> dict[str, Any]:
         log.warning("Unparseable tool arguments: %r", raw)
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+_RETRY_AFTER = re.compile(r"try again in\s+((?:\d+h)?(?:\d+m(?!s))?(?:[\d.]+s)?(?:[\d.]+ms)?)", re.IGNORECASE)
+
+
+def parse_retry_after(text: str) -> float | None:
+    """Read "Please try again in 1m7.5s" / "in 450ms" from a rate-limit message, in seconds."""
+    match = _RETRY_AFTER.search(text or "")
+    if not match or not match.group(1):
+        return None
+    total = 0.0
+    for amount, unit in re.findall(r"([\d.]+)(ms|h|m|s)", match.group(1)):
+        total += float(amount) * {"h": 3600, "m": 60, "s": 1, "ms": 0.001}[unit]
+    return total
 
 
 def _public(message: dict[str, Any]) -> dict[str, Any]:
@@ -200,16 +221,36 @@ class BaseProvider(ABC):
         """
         if not self.is_configured:
             raise LLMError(self.name, LLMErrorKind.NOT_CONFIGURED, f"no API key set for {self.name}")
+        options = options or {}
         while True:
             model = self.model
             try:
-                return self._chat_with_model(model, messages, tools, system_prompt, options or {})
+                return self._chat_with_model(model, messages, tools, system_prompt, options)
             except LLMError as exc:
+                if exc.kind is LLMErrorKind.RATE_LIMIT and options.get("rotate_on_rate_limit"):
+                    response = self._try_other_models(model, messages, tools, system_prompt, options)
+                    if response is not None:
+                        return response
+                    raise
                 if exc.kind is not LLMErrorKind.MODEL_UNAVAILABLE or self._model_index + 1 >= len(self.models):
                     raise
                 self._model_index += 1
                 log.warning("%s model %s is unavailable (%s); switching to %s",
                             self.name, model, exc.detail[:200], self.model)
+
+    def _try_other_models(self, busy_model: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
+                          system_prompt: str, options: dict[str, Any]) -> LLMResponse | None:
+        """The free tier limits each model separately: when one is at its limit, try the others once."""
+        for model in self.models:
+            if model == busy_model:
+                continue
+            try:
+                log.info("%s is at its rate limit; trying %s for this request", busy_model, model)
+                return self._chat_with_model(model, messages, tools, system_prompt, options)
+            except LLMError as exc:
+                if exc.kind not in (LLMErrorKind.RATE_LIMIT, LLMErrorKind.MODEL_UNAVAILABLE):
+                    raise
+        return None
 
     @abstractmethod
     def _chat_with_model(self, model: str, messages: list[dict[str, Any]],

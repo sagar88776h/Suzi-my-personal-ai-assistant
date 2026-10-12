@@ -206,64 +206,47 @@ def _schema(name: str, description: str, properties: dict[str, Any] | None = Non
             "parameters": {"type": "object", "properties": properties or {}, "required": required or []}}
 
 
+READ_LINES = 100  # lines per read_file call - keeps each request small
+
 DEV_TOOLS = [
-    _schema("list_files", "List the project's code files with their sizes.",
-            {"folder": {"type": "string", "description": "Folder to list, e.g. 'tools'. Empty = all."}}),
-    _schema("read_file", "Read part of a file with line numbers (max 150 lines per call).",
+    _schema("list_files", "List code files and sizes.", {"folder": {"type": "string"}}),
+    _schema("read_file", f"Read up to {READ_LINES} numbered lines of a file.",
             {"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}},
             ["path"]),
-    _schema("search_code", "Find lines matching a regular expression across the project.",
-            {"pattern": {"type": "string"}}, ["pattern"]),
-    _schema("write_file", "Create a file, or completely replace one, with the given content.",
+    _schema("search_code", "Regex search across the project.", {"pattern": {"type": "string"}}, ["pattern"]),
+    _schema("write_file", "Create or overwrite a file.",
             {"path": {"type": "string"}, "content": {"type": "string"}}, ["path", "content"]),
-    _schema("replace_in_file", "Replace one exact, unique piece of text in a file.",
+    _schema("replace_in_file", "Replace one exact, unique text in a file.",
             {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}},
             ["path", "old_text", "new_text"]),
     _schema("delete_file", "Delete a file.", {"path": {"type": "string"}}, ["path"]),
-    _schema("run_tests", "Run the pytest test suite (optionally one test file) and see the result.",
-            {"test_file": {"type": "string", "description": "e.g. tests/test_cricket.py; empty = all"}}),
-    _schema("finish", "The change is complete. Runs all tests first; succeeds only if they pass.",
-            {"summary": {"type": "string",
-                         "description": "2-4 plain sentences for Sagar: what changed and how to use it."}},
+    _schema("run_tests", "Run pytest (one test file, or all if empty).", {"test_file": {"type": "string"}}),
+    _schema("finish", "Done: runs all tests, succeeds only if they pass.",
+            {"summary": {"type": "string", "description": "2-4 plain sentences: what changed, how to use it"}},
             ["summary"]),
-    _schema("give_up", "Stop because the task can't be done (explain why in plain words).",
-            {"reason": {"type": "string"}}, ["reason"]),
+    _schema("give_up", "The task can't be done; say why.", {"reason": {"type": "string"}}, ["reason"]),
 ]
 
-AGENT_PROMPT = """You are the developer of Suzy, a Python 3.11+ voice assistant for Windows 10/11. \
-You are changing Suzy's OWN source code, in a private copy of the project. Paths are relative to \
-the project root.
+AGENT_PROMPT = """You are the developer of Suzy (Python 3.11+, Windows voice assistant), changing Suzy's \
+OWN code in a private copy. Paths are relative to the project root.
 
-PROJECT LAYOUT
-- main.py: entry point (terminal chat, startup checks). guard.py: rescue launcher (protected, never edit).
-- core/: assistant.py (LLM tool loop), llm.py (Groq/Gemini), prompts.py (Suzy's personality), \
-voice.py, audio.py (mic/speakers), stt.py (Whisper), tts.py (voice), hotkey.py, config.py \
-(DEFAULT_CONFIG), selfcode.py (this self-improvement system).
-- tools/: Suzy's abilities. EVERY module in tools/ is loaded automatically - a new file = new abilities.
-- tests/: pytest tests (they must never touch the real PC, network, mic or speakers - mock them).
-- config.yaml: user settings.
+Layout: main.py (entry); guard.py (protected, never edit); core/ = assistant.py (LLM tool loop), llm.py, \
+prompts.py (personality), voice.py, audio.py (mic/speakers), stt.py, tts.py, hotkey.py, config.py \
+(DEFAULT_CONFIG), selfcode.py; tools/ = abilities, every module auto-loaded; tests/ = pytest (mock \
+network, OS, mic, speakers); config.yaml = settings.
 
-ADDING AN ABILITY (a new file tools/<topic>.py):
+New ability = new file tools/<topic>.py:
     from tools.registry import ToolResult, tool
+    @tool(description="...", parameters={{"type": "object", "properties": {{"x": {{"type": "string"}}}}, \
+"required": ["x"]}}, category="<topic>")
+    def do_it(x: str) -> ToolResult:
+        return ToolResult.ok("Short spoken sentence.")  # or ToolResult.fail("Why.")
+plus tests/test_<topic>.py. Packages: {packages}. HTTP: urllib.request with timeout=10 (no requests). \
+Free no-key APIs only. Windows calls via tools/winutils.py.
 
-    @tool(description="What it does, for the AI to decide when to use it.",
-          parameters={{"type": "object", "properties": {{"city": {{"type": "string"}}}}, "required": ["city"]}},
-          category="<topic>")
-    def get_something(city: str) -> ToolResult:
-        ...
-        return ToolResult.ok("One short spoken sentence.", detail=value)   # or ToolResult.fail("Why, in plain words.")
-Installed packages (use nothing else): {packages}. For HTTP use urllib.request (requests is NOT \
-installed) with a timeout of 10 s. Only free APIs that need no key. Windows-only calls go through \
-tools/winutils.py helpers. Also add tests/test_<topic>.py that mocks network/OS calls.
-
-RULES
-- Look at the relevant files first (list_files, search_code, read_file). Make the smallest change \
-that fully does the job; keep the existing style and comments.
-- Edit with replace_in_file; use write_file for new files. Keep each file under ~250 lines.
-- Run the tests for what you changed. When everything works, call finish with a plain summary for \
-{user}. If the task needs something impossible (a paid API, admin rights, missing hardware), call \
-give_up and explain.
-"""
+Rules: search_code first, then read only the lines you need. Smallest change that does the job, \
+existing style. replace_in_file for edits, write_file for new files (under 200 lines). Run tests, \
+then finish with a summary for {user}. Impossible (paid API, admin, hardware)? give_up."""
 
 
 @dataclass
@@ -280,9 +263,18 @@ class AgentSettings:
     context_tokens: int = 4500       # keep each request small for free-tier token limits
     max_output_tokens: int = 3000
     reasoning_effort: str = "medium"
-    rate_limit_wait: float = 20.0    # seconds to wait when the free tier is exhausted
-    max_rate_limit_waits: int = 15
+    rate_limit_wait: float = 20.0    # wait when the provider doesn't say how long
+    max_rate_limit_waits: int = 60
+    max_single_wait: float = 300.0   # longer than this = daily allowance used up: stop instead
     test_timeout: int = 900
+
+
+class RateLimitExhausted(Exception):
+    """The free allowance won't reset soon (e.g. the daily limit was reached)."""
+
+    def __init__(self, seconds: float) -> None:
+        super().__init__(f"rate limit resets in {seconds:.0f}s")
+        self.seconds = seconds
 
 
 def estimate_tokens(value: Any) -> int:
@@ -330,7 +322,7 @@ class DevAgent:
                 return f"Error: {args['path']} does not exist."
             lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
             start = max(1, int(args.get("start_line") or 1))
-            end = min(len(lines), int(args.get("end_line") or start + 149), start + 149)
+            end = min(len(lines), int(args.get("end_line") or start + READ_LINES - 1), start + READ_LINES - 1)
             body = "\n".join(f"{n:4d}| {lines[n - 1]}" for n in range(start, end + 1))
             more = f"\n... ({len(lines) - end} more lines)" if end < len(lines) else ""
             self.on_progress(f"reading {args['path']}")
@@ -416,7 +408,8 @@ class DevAgent:
                 return
             content = messages[index]["content"]
             if len(content) > 300:
-                messages[index]["content"] = content[:300] + "\n...(older output trimmed)"
+                messages[index]["content"] = (content[:300] + "\n...(trimmed to save space - if you still need "
+                                              "it, read only the specific lines again)")
         # 2. Drop the contents of old write_file calls.
         for message in messages[1:-4]:
             if total() <= budget:
@@ -448,7 +441,8 @@ class DevAgent:
             try:
                 return self.llm.chat(messages, DEV_TOOLS, self.system_prompt,
                                      options={"max_tokens": max_output,
-                                              "reasoning_effort": self.settings.reasoning_effort})
+                                              "reasoning_effort": self.settings.reasoning_effort,
+                                              "rotate_on_rate_limit": True})
             except LLMUnavailableError as exc:
                 details = " ".join(e.detail for e in exc.errors).lower()
                 if "too large" in details and budget > 2000:
@@ -457,9 +451,13 @@ class DevAgent:
                     log.info("Request too large; shrinking to %d context / %d output tokens", budget, max_output)
                     continue
                 if LLMErrorKind.RATE_LIMIT in exc.kinds() and waits < self.settings.max_rate_limit_waits:
+                    wait = exc.retry_after()
+                    if wait is not None and wait > self.settings.max_single_wait:
+                        raise RateLimitExhausted(wait) from exc
                     waits += 1
-                    self.on_progress("waiting a little for my free AI usage limit to reset")
-                    self._sleep(self.settings.rate_limit_wait)
+                    wait = self.settings.rate_limit_wait if wait is None else wait + 1.0
+                    self.on_progress(f"waiting {wait:.0f}s for my free AI usage limit to reset")
+                    self._sleep(wait)
                     continue
                 raise
 
@@ -471,6 +469,10 @@ class DevAgent:
                 return AgentOutcome(False, error="Cancelled.", steps=step)
             try:
                 response = self._ask_llm(messages)
+            except RateLimitExhausted as exc:
+                minutes = max(1, round(exc.seconds / 60))
+                return AgentOutcome(False, error=f"I've used up my free AI allowance for now (it resets in about "
+                                                 f"{minutes} minutes). Ask me again after that.", steps=step)
             except LLMUnavailableError as exc:
                 return AgentOutcome(False, error=f"My AI brain stopped responding ({exc.user_message()})", steps=step)
 
@@ -566,7 +568,11 @@ class SelfDevManager:
                 "I'll tell you when it's ready to try.")
 
     def _job_progress(self, job: DevJob, text: str) -> None:
+        previous = job.progress[-1] if job.progress else ""
         job.progress.append(text)
+        # Don't repeat the same kind of message back to back (e.g. several waits in a row).
+        if text == previous or (text.startswith("waiting") and previous.startswith("waiting")):
+            return
         self.progress(text)
 
     def _run_job(self, job: DevJob) -> None:

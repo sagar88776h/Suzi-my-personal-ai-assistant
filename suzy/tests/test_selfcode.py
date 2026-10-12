@@ -210,7 +210,8 @@ def test_agent_builds_a_feature(project):
     assert any("1| def search():" in r for r in tool_results)                    # read_file
     assert any("tools/web.py:1: def search():" in r for r in tool_results)       # search_code
     assert "writing tools/cricket.py" in progress and "running the full test suite" in progress
-    assert llm.calls[0]["options"] == {"max_tokens": 3000, "reasoning_effort": "medium"}
+    assert llm.calls[0]["options"] == {"max_tokens": 3000, "reasoning_effort": "medium",
+                                       "rotate_on_rate_limit": True}
     assert "groq, psutil" in llm.calls[0]["system"]
 
 
@@ -257,10 +258,30 @@ def test_agent_tool_errors_are_reported_not_raised(project):
 
 def test_agent_waits_out_rate_limits(project):
     limited = LLMUnavailableError([LLMError("groq", LLMErrorKind.RATE_LIMIT, "429")])
-    llm = ScriptedLLM(limited, limited, call("give_up", reason="ok"))
-    agent, _, sleeps = make_agent(project, llm, rate_limit_wait=7)
+    timed = LLMUnavailableError([LLMError("groq", LLMErrorKind.RATE_LIMIT,
+                                          "Rate limit reached on TPM. Please try again in 7.5s.")])
+    llm = ScriptedLLM(limited, timed, call("give_up", reason="ok"))
+    agent, _, sleeps = make_agent(project, llm, rate_limit_wait=20)
     agent.run("x")
-    assert sleeps == [7, 7]
+    assert sleeps == [20, 8.5]  # unknown -> default wait; known -> exactly what Groq asked (+1 s)
+
+
+def test_agent_stops_when_daily_allowance_is_used_up(project):
+    daily = LLMUnavailableError([LLMError("groq", LLMErrorKind.RATE_LIMIT,
+                                          "Limit on tokens per day (TPD). Please try again in 1h12m3s.")])
+    agent, _, sleeps = make_agent(project, ScriptedLLM(daily))
+    outcome = agent.run("x")
+    assert not outcome.success and "about 72 minutes" in outcome.error and sleeps == []
+
+
+def test_progress_messages_are_not_repeated(project):
+    shown = []
+    manager = SelfDevManager(Config(), ScriptedLLM(), root=project, progress=shown.append)
+    job = type("Job", (), {"progress": []})()
+    for text in ["reading a.py", "waiting 8s for my free AI usage limit to reset",
+                 "waiting 9s for my free AI usage limit to reset", "reading a.py", "reading a.py"]:
+        manager._job_progress(job, text)
+    assert shown == ["reading a.py", "waiting 8s for my free AI usage limit to reset", "reading a.py"]
 
 
 def test_agent_shrinks_too_large_requests(project):
