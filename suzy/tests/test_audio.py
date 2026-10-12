@@ -72,6 +72,15 @@ def test_records_until_pause(monkeypatch):
     assert max(levels) > 0.1
 
 
+def test_slow_consumer_does_not_append_backlog(monkeypatch):
+    """Regression: on Windows the mic thread can run ahead of the recorder.
+    Blocks queued after the pause must not be glued onto the recording."""
+    install_fake_sounddevice(monkeypatch, mic_signal=speech_signal(0.5, 1.0, 3.0))
+    captured = Recorder(fast_settings()).record(level_callback=lambda _level: time.sleep(0.002))
+    assert captured is not None
+    assert 1.8 <= len(captured) / audio.SAMPLE_RATE <= 2.6
+
+
 def test_returns_none_when_nothing_said(monkeypatch):
     install_fake_sounddevice(monkeypatch, mic_signal=speech_signal(0.5, 0.0, 0.0))
     assert Recorder(fast_settings(no_speech_timeout=0.5)).record() is None

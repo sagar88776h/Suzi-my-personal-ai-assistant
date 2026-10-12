@@ -169,10 +169,9 @@ class Recorder:
         except Exception as exc:  # noqa: BLE001 - e.g. mic unplugged mid-recording
             raise AudioDeviceError("The microphone stopped working while I was listening.") from exc
         finally:
+            # Blocks still queued arrived after the decision to stop (trailing
+            # silence, or audio after the user pressed stop), so they're dropped.
             self._active.clear()
-            # Drain anything still queued so it isn't lost.
-            while not blocks.empty():
-                captured.append(blocks.get_nowait())
 
         if not captured or (not heard_speech and not self._stop.is_set()):
             return None
