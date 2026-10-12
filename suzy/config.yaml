@@ -1,0 +1,36 @@
+# ---------------------------------------------------------------------------
+# Suzy configuration
+# Every value here is optional - anything you delete falls back to a default.
+# API keys do NOT go here; put them in the .env file (see .env.example).
+# ---------------------------------------------------------------------------
+
+user:
+  name: Sourab            # how Suzy addresses you
+
+assistant:
+  name: Suzy
+  max_context_turns: 20   # how many past conversation turns the brain remembers
+  max_tool_rounds: 5      # max chained PC actions for a single request
+
+llm:
+  provider: groq          # primary brain: groq | gemini
+  fallback_provider: gemini
+  temperature: 0.6
+  max_tokens: 1024
+  request_timeout: 20     # seconds before a brain request is abandoned
+  groq:
+    model: llama-3.3-70b-versatile
+  gemini:
+    model: gemini-2.5-flash
+    thinking_budget: 0    # 0 = fastest replies on 2.5 Flash; null for models without a budget
+
+tools:
+  apps:
+    fuzzy_threshold: 80   # how sure Suzy must be (0-100) before opening an app
+    suggest_threshold: 60 # below fuzzy_threshold but above this -> "did you mean ...?"
+    extra_search_dirs: [] # extra folders to scan for apps, e.g. ["D:\\Games"]
+
+logging:
+  level: DEBUG            # DEBUG | INFO | WARNING | ERROR
+  max_bytes: 2000000      # rotate a log file after ~2 MB
+  backup_count: 5

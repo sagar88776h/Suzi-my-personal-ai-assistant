@@ -1,0 +1,12 @@
+# --- Phase 1: brain + basic PC tools ---
+groq>=0.30.0                 # Groq LLM API (primary provider)
+google-genai>=1.20.0         # Google Gemini API (fallback provider)
+python-dotenv>=1.0.0         # loads API keys from .env
+PyYAML>=6.0                  # config.yaml
+psutil>=5.9.0                # CPU / RAM / battery / disk info
+rapidfuzz>=3.0.0             # fuzzy matching of app names
+pycaw>=20240210; sys_platform == "win32"     # Windows master volume control
+comtypes>=1.2.0; sys_platform == "win32"     # COM support required by pycaw
+
+# --- Development / testing ---
+pytest>=8.0.0
