@@ -17,3 +17,4 @@ data/*
 # PyInstaller
 build/
 dist/
+models/

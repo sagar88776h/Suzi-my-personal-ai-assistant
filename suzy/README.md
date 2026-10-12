@@ -4,11 +4,12 @@ Suzy is a voice assistant for Windows 10/11. She's warm, a bit witty, and she ca
 control your PC: open apps, change the volume, search the web, report on your
 system, and plenty more as the build goes on. She understands English and Hinglish.
 
-> **Build status:** Suzy is being built in phases. **Phase 1 is done:** a text
-> chat in the terminal with a real AI brain (Groq, with Gemini as a fallback) that
-> can run these PC actions: open apps, set the volume, tell the time and date,
-> search Google, and report system info. Voice, the wake word, the floating orb UI
-> and the rest of the tools come in later phases (see the [Roadmap](#roadmap)).
+> **Build status:** Suzy is being built in phases. **Phases 1 and 2 are done.**
+> Suzy has a real AI brain (Groq, with Gemini as a backup) that runs PC actions:
+> open apps, set the volume, tell the time and date, search Google, and report
+> system info. She **speaks** her replies in a natural female voice and
+> **listens** when you press Enter or **Ctrl+Alt+S**. The wake word, the floating
+> orb UI and the rest of the tools come in later phases (see the [Roadmap](#roadmap)).
 
 ---
 
@@ -126,9 +127,18 @@ Keep this file private and never share it. Git is already set up to ignore it.
 python main.py
 ```
 
-Try these:
+**Talking to Suzy:** press **Enter** on an empty line, or **Ctrl+Alt+S** from any
+window. You'll hear a chime. Speak, then just pause, and Suzy stops listening by
+herself. She speaks every reply out loud. Press **Ctrl+Alt+S** while she's talking
+to interrupt her and ask something else.
 
-| You type                                  | What happens                                      |
+> The **first time** you start Suzy, she downloads her speech model (about 480 MB)
+> in the background. You can type to her while it downloads. After that,
+> listening works offline.
+
+Try these (type them or say them):
+
+| You type or say                           | What happens                                      |
 |-------------------------------------------|---------------------------------------------------|
 | `open notepad`                            | Notepad opens                                     |
 | `open chrome`                             | Google Chrome opens (fuzzy names work)            |
@@ -140,12 +150,14 @@ Try these:
 | `open chrome and set volume to 50`        | Both actions, one after the other                 |
 
 Commands you can type in the chat: `/help`, `/tools` (lists everything Suzy can
-do), `/reset` (forgets the conversation), `exit`.
+do), `/mute` (voice off/on), `/reset` (forgets the conversation), `exit`.
 
 Other ways to run it:
 
 ```powershell
 python main.py --once "open calculator"   # run a single command and exit
+python main.py --mute                     # Suzy types but doesn't speak
+python main.py --no-voice                 # no microphone or hotkey (typing only)
 python main.py --quiet                    # hide the "-> open_app(...)" action trace
 python main.py --debug                    # show debug logs in the console
 python main.py --check                    # test the API keys and AI models, then exit
@@ -173,7 +185,17 @@ If `config.yaml` is missing or broken, Suzy falls back to safe defaults and tell
 ## 3. How it works
 
 ```
-you type ──► Assistant ──► LLM router ──► Groq (retry once) ──► Gemini fallback
+mic ──► Recorder (stops at your pause) ──► Whisper speech-to-text ─┐
+                                                                   ▼
+you type ──────────────────────────────────────────────────► Assistant
+                                                                   │
+speakers ◄── edge-tts voice (sentence by sentence) ◄── reply ◄─────┘
+```
+
+Inside the Assistant:
+
+```
+Assistant ──► LLM router ──► Groq (retry once) ──► Gemini fallback
                  ▲              │
                  │              └── the model picks a tool via function calling
                  │                                │
@@ -184,6 +206,9 @@ you type ──► Assistant ──► LLM router ──► Groq (retry once) �
 * `core/llm.py` contains the Groq and Gemini providers and the failover router. If
   the primary fails, Suzy retries once and then switches to the fallback. A bad key
   skips the retry.
+* `core/voice.py` runs one voice turn: listen, transcribe, think, speak. It is
+  shared by the terminal and, later, the orb UI. `core/audio.py` handles the mic
+  and speakers, `core/stt.py` handles Whisper, and `core/tts.py` handles the voice.
 * `core/assistant.py` runs the tool-calling loop and keeps the last 20
   conversation turns as context.
 * `tools/` holds one typed Python function per PC action, registered with the
@@ -203,12 +228,20 @@ you type ──► Assistant ──► LLM router ──► Groq (retry once) �
 | *"I can't reach the internet"* | Check your connection. Phase 6 adds offline commands. |
 | *"I've hit my free usage limit"* | Wait a minute. Suzy also switches to Gemini automatically if that key is set. |
 | *"I couldn't find an app called X"* | Use the name shown in the Start menu, or add the app's folder to `tools.apps.extra_search_dirs` in `config.yaml`. |
+| Suzy doesn't hear me | Check that your mic is the default *input* in Windows Sound settings, and that *Settings → Privacy & security → Microphone* allows desktop apps. Speak after the chime. |
+| Suzy stops listening too early / too late | Raise or lower `voice.silence_seconds` in `config.yaml` (default 1.2). |
+| Suzy misunderstands words | Set `stt.beam_size: 5` (a bit slower), or `stt.model: medium` (much slower but more accurate). For English only, set `stt.language: en`. |
+| Change her voice or speed | `tts.voice`, `tts.rate` (`"+15%"` = faster) and `tts.pitch` in `config.yaml`. |
+| Robotic voice | No internet, so Suzy switched to the Windows built-in voice. The natural voice comes back automatically when you're online again. |
+| *"I couldn't download my speech model"* | Suzy needs internet once to download it. Check your connection and restart her. |
+| Speech model fails to load (DLL error) | Install the *Microsoft Visual C++ Redistributable (x64)* from Microsoft's website, then restart Suzy. |
+| Ctrl+Alt+S does nothing | Another app may own that shortcut. Pick another one in `voice.hotkey` (e.g. `ctrl+alt+space`). |
 | Anything else | Look in `logs/errors.log`. |
 
 ## Roadmap
 
 - [x] **Phase 1**: terminal chat, LLM tool calling with Groq→Gemini failover, and 5 basic tools
-- [ ] **Phase 2**: Suzy speaks (edge-tts) and listens with push-to-talk (faster-whisper)
+- [x] **Phase 2**: Suzy speaks (edge-tts, offline fallback voice) and listens with push-to-talk (faster-whisper)
 - [ ] **Phase 3**: "Hey Suzy" wake word, voice activity detection, interruption, follow-up mode
 - [ ] **Phase 4**: the full tool set, the safety/confirmation layer, and tests for every tool
 - [ ] **Phase 5**: floating orb UI, chat panel, tray icon, settings window

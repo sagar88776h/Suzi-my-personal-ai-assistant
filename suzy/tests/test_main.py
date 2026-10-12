@@ -31,7 +31,7 @@ def test_startup_report():
 def test_once_mode_without_keys(monkeypatch, capsys):
     for var in ("GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
         monkeypatch.setenv(var, "")
-    assert main.main(["--once", "hello"]) == 0
+    assert main.main(["--once", "hello", "--mute"]) == 0
     out = capsys.readouterr().out
     assert "Heads up" in out and "API key" in out
 
@@ -39,11 +39,12 @@ def test_once_mode_without_keys(monkeypatch, capsys):
 def test_terminal_chat_commands(monkeypatch, capsys):
     for var in ("GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
         monkeypatch.setenv(var, "")
-    inputs = iter(["", "/help", "/tools", "/reset", "exit"])
+    inputs = iter(["", "/help", "/tools", "/mute", "/mute", "/reset", "exit"])
     monkeypatch.setattr("builtins.input", lambda _prompt="": next(inputs))
-    assert main.main([]) == 0
+    assert main.main(["--mute", "--no-voice"]) == 0
     out = capsys.readouterr().out
     assert "/reset" in out and "open_app" in out and "Fresh start" in out and "Bye for now" in out
+    assert "Voice on." in out and "Voice off." in out
 
 
 def test_terminal_chat_handles_ctrl_c(monkeypatch, capsys):
@@ -54,7 +55,7 @@ def test_terminal_chat_handles_ctrl_c(monkeypatch, capsys):
         raise KeyboardInterrupt
 
     monkeypatch.setattr("builtins.input", interrupt)
-    assert main.main([]) == 0
+    assert main.main(["--mute", "--no-voice"]) == 0
     assert "Bye for now" in capsys.readouterr().out
 
 
@@ -98,3 +99,51 @@ def test_print_reply_shows_detail(capsys):
     assert "(details: groq: auth - 401)" in capsys.readouterr().out
     main.print_reply(main.AssistantReply("Oops.", error=True, detail="x"), show_actions=False)
     assert "details" not in capsys.readouterr().out
+
+
+def test_terminal_ui_redraws_prompt_after_background_event(monkeypatch, capsys):
+    ui = main.TerminalUI()
+    ui._at_prompt = True  # main thread is waiting in input()
+    ui.on_event("listening", None)
+    ui.on_event("heard", "open notepad")
+    ui.on_event("reply", main.AssistantReply("Opening Notepad."))
+    ui.on_event("idle", None)
+    out = capsys.readouterr().out
+    assert out.startswith("\nSuzy: Listening")
+    assert "You (voice): open notepad" in out and "Suzy: Opening Notepad." in out
+    assert out.endswith("You: ")
+
+
+def test_build_voice_without_devices(monkeypatch):
+    """No sound card at all: Suzy still starts, explains, and runs typing-only."""
+    import sys
+
+    monkeypatch.setitem(sys.modules, "sounddevice", None)
+    config = Config()
+    assistant, _router, _registry = main.build_assistant(config)
+    voice = main.build_voice(config, assistant, main.TerminalUI())
+    assert not voice.session.can_listen and voice.hotkey is None
+    assert any("audio system" in p for p in voice.problems)
+
+
+def test_build_voice_with_fake_devices(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    from tests.fake_sounddevice import install_fake_sounddevice
+    from tests.test_hotkey import FakeHotKeys
+
+    install_fake_sounddevice(monkeypatch)
+    keyboard = types.SimpleNamespace(GlobalHotKeys=FakeHotKeys)
+    package = types.ModuleType("pynput")
+    package.keyboard = keyboard
+    monkeypatch.setitem(sys.modules, "pynput", package)
+    monkeypatch.setitem(sys.modules, "pynput.keyboard", keyboard)
+    monkeypatch.setattr("core.stt.SpeechToText.load_async", lambda self: None)
+    config = Config({"stt": {"models_dir": str(tmp_path)}})
+    assistant, _router, _registry = main.build_assistant(config)
+    ui = main.TerminalUI()
+    voice = main.build_voice(config, assistant, ui)
+    assert voice.session.can_listen and voice.hotkey is not None and ui.hotkey_label == "Ctrl+Alt+S"
+    assert any("downloading my speech model" in n for n in voice.notes)
+    assert any("Fake Mic" in n for n in voice.notes) and voice.problems == []

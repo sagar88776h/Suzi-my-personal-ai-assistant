@@ -511,6 +511,10 @@ class ProviderStatus:
             LLMErrorKind.BAD_REQUEST: "the request was refused",
             LLMErrorKind.UNKNOWN: "unexpected error",
         }
+        if self.error.kind is LLMErrorKind.AUTH and "ACCESS_TOKEN_TYPE_UNSUPPORTED" in self.error.detail:
+            # Google currently refuses many new-format "AQ." Gemini keys; nothing the user can fix.
+            return ("NOT working - Google is refusing new 'AQ.' keys right now "
+                    "(a Google-side issue, not your setup)")
         return f"NOT working - {reasons[self.error.kind]}"
 
 

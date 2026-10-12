@@ -51,6 +51,32 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "thinking_budget": None,     # None = model default; 0 disables thinking on 2.5 models
         },
     },
+    "voice": {
+        "enabled": True,             # microphone + push-to-talk
+        "hotkey": "ctrl+alt+s",      # works from any window
+        "max_record_seconds": 15,
+        "silence_seconds": 1.2,      # pause that ends what you're saying
+        "no_speech_timeout": 6,      # stop listening if you say nothing
+        "sound_cues": True,          # chime when listening starts/stops
+    },
+    "tts": {
+        "enabled": True,
+        "voice": "en-IN-NeerjaNeural",
+        "fallback_voice": "en-US-AriaNeural",
+        "rate": "+0%",               # speed, e.g. "+15%" faster, "-10%" slower
+        "pitch": "+0Hz",
+        "volume": "+0%",
+        "offline_fallback": True,    # Windows built-in voice when there's no internet
+    },
+    "stt": {
+        "model": "small",            # tiny | base | small | medium (bigger = slower, more accurate)
+        "device": "cpu",
+        "compute_type": "int8",
+        "language": None,            # None = auto (English/Hindi); "en" to force English
+        "allowed_languages": ["en", "hi"],
+        "beam_size": 1,              # 1 = fastest; 5 = a little more accurate
+        "models_dir": "models",
+    },
     "tools": {
         "apps": {
             "fuzzy_threshold": 80,     # score needed to open an app directly

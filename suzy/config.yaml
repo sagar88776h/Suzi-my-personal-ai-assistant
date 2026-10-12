@@ -31,6 +31,32 @@ llm:
       - gemini-2.5-flash
     thinking_budget: null # null = model default; 0 disables thinking on 2.5 models
 
+voice:
+  enabled: true           # microphone + push-to-talk
+  hotkey: ctrl+alt+s      # push-to-talk from any window
+  max_record_seconds: 15  # longest single request
+  silence_seconds: 1.2    # how long a pause ends what you're saying
+  no_speech_timeout: 6    # stop listening if you say nothing for this long
+  sound_cues: true        # chime when Suzy starts / stops listening
+
+tts:                      # Suzy's voice
+  enabled: true
+  voice: en-IN-NeerjaNeural      # also try en-US-AriaNeural, en-US-JennyNeural, en-GB-SoniaNeural
+  fallback_voice: en-US-AriaNeural
+  rate: "+0%"             # speed: "+15%" faster, "-10%" slower
+  pitch: "+0Hz"           # "+5Hz" higher, "-5Hz" lower
+  volume: "+0%"
+  offline_fallback: true  # use the Windows built-in voice when there's no internet
+
+stt:                      # Suzy's ears (faster-whisper, runs on your CPU)
+  model: small            # tiny | base | small | medium - bigger is more accurate but slower
+  device: cpu
+  compute_type: int8
+  language: null          # null = auto (English / Hindi); "en" to force English
+  allowed_languages: [en, hi]
+  beam_size: 1            # 1 = fastest; 5 = slightly more accurate
+  models_dir: models      # downloaded once, then works offline
+
 tools:
   apps:
     fuzzy_threshold: 80   # how sure Suzy must be (0-100) before opening an app

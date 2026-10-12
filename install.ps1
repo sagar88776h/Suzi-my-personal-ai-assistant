@@ -159,7 +159,7 @@ function Install-Suzy {
 
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     # Copy everything except your private/local files (.env, config.yaml, venv, logs, data).
-    & robocopy $source $InstallDir /E /XD .venv data logs __pycache__ /XF .env config.yaml /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+    & robocopy $source $InstallDir /E /XD .venv data logs models __pycache__ /XF .env config.yaml /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "Copying Suzy's files failed (robocopy code $LASTEXITCODE)." }
     $configPath = Join-Path $InstallDir 'config.yaml'
     $newConfig = Join-Path $source 'config.yaml'
