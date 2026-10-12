@@ -40,6 +40,13 @@ voice:
   silence_seconds: 1.2    # how long a pause ends what you're saying
   no_speech_timeout: 6    # stop listening if you say nothing for this long
   sound_cues: true        # chime when Suzy starts / stops listening
+  wake_word:              # always-on listening for her name (offline)
+    enabled: true         # say "Suzy", "Hi Suzy", "Hello Suzy" - or "Hey Suzy, open Notepad"
+    model: tiny           # name checker: tiny (fastest) or base (more accurate, a bit slower)
+    followup_seconds: 8   # after she answers, ask the next thing without her name (0 = off)
+    command_timeout: 6    # after "Suzy", how long she waits for your request
+    vad_threshold: 0.5    # 0-1: raise if she wakes up by mistake, lower if she misses you
+    end_silence: 0.7      # pause (seconds) that ends what you're saying
 
 tts:                      # Suzy's voice
   enabled: true

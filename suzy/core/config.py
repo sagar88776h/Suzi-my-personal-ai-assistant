@@ -60,6 +60,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "silence_seconds": 1.2,      # pause that ends what you're saying
         "no_speech_timeout": 6,      # stop listening if you say nothing
         "sound_cues": True,          # chime when listening starts/stops
+        "wake_word": {
+            "enabled": True,         # always listen for "Suzy" / "Hi Suzy" / "Hello Suzy"
+            "model": "tiny",         # Whisper model that checks for her name (tiny = fastest)
+            "followup_seconds": 8,   # after answering, the next request needs no wake word (0 = off)
+            "command_timeout": 6,    # after "Suzy", how long to wait for the request
+            "vad_threshold": 0.5,    # 0-1: higher = needs clearer speech (fewer false triggers)
+            "end_silence": 0.7,      # pause that ends a sentence
+        },
     },
     "tts": {
         "enabled": True,

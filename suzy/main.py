@@ -37,6 +37,13 @@ from core.audio import (
 )
 from core.config import Config
 from core.hotkey import GlobalHotkey
+from core.listener import (
+    ListenerRecorder,
+    ListenerSettings,
+    SegmenterSettings,
+    WakeListener,
+    WakeWordDetector,
+)
 from core.llm import LLMRouter, ProviderStatus
 from core.logging_setup import setup_logging
 from core.paths import APP_DIR
@@ -51,6 +58,10 @@ log = logging.getLogger("suzy.main")
 
 EXIT_WORDS = {"exit", "quit", "bye", "goodbye", "/exit", "/quit"}
 HELP_TEXT = """How to talk to Suzy:
+  say "Suzy" / "Hi Suzy" / "Hello Suzy"   then your request - or all at once:
+                        "Hey Suzy, open Notepad". After she answers you have 8 seconds
+                        to ask something else without saying her name.
+  "Suzy" or "Suzy stop" while she's talking interrupts her
   type a message        and press Enter
   press Enter           on an empty line to speak (Suzy stops listening when you pause)
   Ctrl+Alt+S            from ANY window: talk / stop listening / interrupt Suzy
@@ -92,6 +103,7 @@ class VoiceSetup:
     hotkey: GlobalHotkey | None
     notes: list[str]      # informational lines for the user
     problems: list[str]   # things that don't work
+    listener: Any = None  # WakeListener when the wake word is on
 
 
 def build_voice(config: Config, assistant: Assistant, ui: TerminalUI,
@@ -145,6 +157,13 @@ def build_voice(config: Config, assistant: Assistant, ui: TerminalUI,
             problems.append(hotkey.error or "The push-to-talk hotkey couldn't be registered.")
             hotkey = None
 
+    listener = None
+    if listen and bool(config.get("voice.wake_word.enabled", True)):
+        listener = build_wake_listener(config, session, mic_device)
+        start_wake_listener_async(config, listener, session, ui)
+        notes.append("Wake word: just say 'Suzy', 'Hi Suzy' or 'Hello Suzy' - or in one go: "
+                     "'Hey Suzy, open Notepad'.")
+
     if tts_settings.enabled and devices is not None and devices.speaker:
         notes.append(f"Voice: {tts_settings.voice}, speaking on {devices.speaker}.")
     if listen and devices is not None:
@@ -152,7 +171,53 @@ def build_voice(config: Config, assistant: Assistant, ui: TerminalUI,
         if mic_device is not None:
             mic_name = next((n for i, n, _d in list_input_devices() if i == mic_device), mic_name)
         notes.append(f"Listening with: {mic_name}.")
-    return VoiceSetup(session, hotkey, notes, problems)
+    return VoiceSetup(session, hotkey, notes, problems, listener)
+
+
+def build_wake_listener(config: Config, session: VoiceSession, mic_device: int | None) -> WakeListener:
+    """The always-on "Suzy" listener: Silero VAD + a tiny Whisper model that checks for her name."""
+    wake_stt = SpeechToText(STTSettings(
+        model=str(config.get("voice.wake_word.model", "tiny")),
+        language="en",               # keeps her name spelled "Suzy" even in Hinglish
+        allowed_languages=(),
+        beam_size=1,
+        initial_prompt="Hey Suzy. Hi Suzy. Hello Suzy.",
+        models_dir=str(config.get("stt.models_dir", "models")),
+    ))
+    settings = ListenerSettings(
+        command_timeout=float(config.get("voice.wake_word.command_timeout", 6)),
+        followup_seconds=float(config.get("voice.wake_word.followup_seconds", 8)),
+        segment=SegmenterSettings(
+            threshold=float(config.get("voice.wake_word.vad_threshold", 0.5)),
+            end_silence=float(config.get("voice.wake_word.end_silence", 0.7)),
+            max_seconds=float(config.get("voice.max_record_seconds", 15)),
+        ),
+    )
+    return WakeListener(WakeWordDetector(wake_stt), on_event=session.on_listener_event,
+                        is_speaking=lambda: session.tts.is_speaking,
+                        spoken_text=lambda: session.current_speech,
+                        settings=settings, device=mic_device)
+
+
+def start_wake_listener_async(config: Config, listener: WakeListener, session: VoiceSession,
+                              ui: TerminalUI) -> threading.Thread:
+    """Load the wake-word model (downloads ~75 MB the first time), then start listening."""
+
+    def run() -> None:
+        try:
+            listener.detector.stt.load()
+        except STTError as exc:
+            ui.on_event("error", f"The wake word isn't available ({exc}). Press Enter or "
+                                 "Ctrl+Alt+S to talk instead.")
+            return
+        listener.start()
+        session.listener = listener
+        session.recorder = ListenerRecorder(listener, float(config.get("voice.no_speech_timeout", 6)))
+        ui.on_event("info", "Wake word ready - say 'Suzy' any time.")
+
+    thread = threading.Thread(target=run, name="WakeWordStartup", daemon=True)
+    thread.start()
+    return thread
 
 
 # =========================================================================== reporting
@@ -513,6 +578,8 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         if voice.hotkey is not None:
             voice.hotkey.stop()
+        if voice.listener is not None:
+            voice.listener.stop()
         voice.session.stop_speaking()
     log.info("Suzy stopped")
     return 0

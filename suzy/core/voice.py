@@ -30,6 +30,7 @@ from core.audio import (
     describe_quiet_recording,
     play_cue,
 )
+from core.listener import VoiceCommand, strip_wake
 from core.stt import SpeechToText, STTError
 from core.tts import TextToSpeech
 
@@ -58,6 +59,8 @@ class VoiceSession:
         self.cues = cues
         self.cue_player = cue_player or Player()
         self._turn = threading.Lock()  # one request at a time
+        self.listener: Any = None      # WakeListener when "Hey Suzy" is on
+        self.current_speech = ""       # what Suzy is saying now (to recognise her own echo)
 
     @property
     def can_listen(self) -> bool:
@@ -79,7 +82,11 @@ class VoiceSession:
         if not text or not self.tts.settings.enabled:
             return False
         self._emit("speaking", text)
-        return self.tts.speak(text)
+        self.current_speech = text
+        try:
+            return self.tts.speak(text)
+        finally:
+            self.current_speech = ""
 
     def say_async(self, text: str) -> threading.Thread:
         thread = threading.Thread(target=self.say, args=(text,), name="SpeakAsync", daemon=True)
@@ -153,20 +160,77 @@ class VoiceSession:
                 self._emit("info", describe_quiet_recording(peak, threshold))
             return None
 
+        return self._transcribe_and_respond(audio)
+
+    def _transcribe_and_respond(self, audio: Any, after_wake_word: bool = False, wake_text: str = "",
+                                quiet_if_empty: bool = False) -> AssistantReply | None:
+        """Speech -> text -> answer (spoken), then listen for a follow-up."""
+        assert self.stt is not None
         self._emit("transcribing")
         try:
             transcript = self.stt.transcribe(audio)
         except STTError as exc:
             return self._fail(str(exc))
         log.info("Heard (%s, %.1fs): %r", transcript.language, transcript.seconds, transcript.text)
-        if not transcript.text:
+        text = transcript.text
+        if after_wake_word:
+            # "Hey Suzy, open Notepad" -> "open Notepad" (the tiny wake model's text is the fallback).
+            text = strip_wake(text) or strip_wake(wake_text)
+            if not text:  # only her name after all: wait for the actual request
+                self._emit("listening")
+                if self.listener is not None:
+                    self.listener.expect_command()
+                return None
+        if not text:
+            if quiet_if_empty:
+                return None
             message = "Sorry, I didn't catch that."
             self._emit("info", message)
             self.say(message)
             return None
 
-        self._emit("heard", transcript.text)
-        return self._respond(transcript.text, speak=True)
+        self._emit("heard", text)
+        reply = self._respond(text, speak=True)
+        if self.listener is not None:
+            self.listener.start_followup()
+        return reply
+
+    # ------------------------------------------------------------------ wake word
+    def on_listener_event(self, kind: str, payload: Any) -> None:
+        """Events from the always-on WakeListener (called on its thread: must not block)."""
+        if kind == "interrupt":
+            self.stop_speaking()
+        elif kind == "wake":
+            self._emit("wake", payload)
+            self._emit("listening")
+            if self.cues:
+                threading.Thread(target=play_cue, args=("start", self.cue_player), daemon=True).start()
+        elif kind == "command":
+            threading.Thread(target=self._voice_command, args=(payload,), name="VoiceCommand",
+                             daemon=True).start()
+        elif kind == "timeout":
+            self._emit("info", "I didn't hear a request - say 'Suzy' again when you need me.")
+            self._emit("idle")
+        elif kind == "error":
+            self._emit("error", payload)
+
+    def _voice_command(self, command: VoiceCommand) -> None:
+        """Answer a request heard by the wake listener. Never raises."""
+        if self.stt is None:
+            return
+        self.stop_speaking()
+        if not self._turn.acquire(timeout=15):
+            log.warning("Dropped a voice request: still busy with the previous one")
+            return
+        try:
+            self._transcribe_and_respond(command.audio, after_wake_word=command.via == "wake",
+                                         wake_text=command.wake_text,
+                                         quiet_if_empty=command.via == "followup")
+        except Exception:  # noqa: BLE001 - a voice turn must never kill the listener thread
+            log.exception("Voice command failed")
+        finally:
+            self._turn.release()
+            self._emit("idle")
 
     def _fail(self, message: str) -> None:
         self._emit("error", message)

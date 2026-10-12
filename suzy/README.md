@@ -4,13 +4,13 @@ Suzy is a voice assistant for Windows 10/11. She's warm, a bit witty, and she ca
 control your PC: open apps, change the volume, search the web, report on your
 system, and plenty more as the build goes on. She understands English and Hinglish.
 
-> **Build status:** Suzy is being built in phases. **Phases 1 and 2 are done.**
+> **Build status:** Suzy is being built in phases. **Phases 1, 2 and 3 are done.**
 > Suzy has a real AI brain (Groq, with Gemini as a backup) that runs PC actions:
 > open apps, set the volume, tell the time and date, search Google, and report
 > system info. She **speaks** her replies in a natural female voice and
-> **listens** when you press Enter or **Ctrl+Alt+S**. She can also **improve
+> **listens** when you say **"Suzy"** (or press Enter / **Ctrl+Alt+S**). She can also **improve
 > herself**: ask her for a new ability or to fix a problem and she changes her own
-> code (see [Suzy improves herself](#suzy-improves-herself)). The wake word, the
+> code (see [Suzy improves herself](#suzy-improves-herself)). The
 > floating orb UI and the rest of the tools come in later phases (see the [Roadmap](#roadmap)).
 
 ---
@@ -129,10 +129,26 @@ Keep this file private and never share it. Git is already set up to ignore it.
 python main.py
 ```
 
-**Talking to Suzy:** press **Enter** on an empty line, or **Ctrl+Alt+S** from any
-window. You'll hear a chime. Speak, then just pause, and Suzy stops listening by
-herself. She speaks every reply out loud. Press **Ctrl+Alt+S** while she's talking
-to interrupt her and ask something else.
+**Talking to Suzy, hands-free:** just say her name, any time:
+
+- **"Suzy"**, **"Hi Suzy"** or **"Hello Suzy"**: you hear a chime, then say what you need.
+- Or say it all at once: **"Hey Suzy, open Notepad"** or **"Suzy, volume thoda kam karo"**.
+- **Follow-up:** after she answers, you have 8 seconds to ask something else *without*
+  her name ("and tomorrow's weather?").
+- **Interrupt:** say **"Suzy"** or **"Suzy, stop"** while she's talking. With laptop
+  speakers she may not always hear you over her own voice; **Ctrl+Alt+S** always works.
+
+She listens offline. A voice detector (Silero) notices speech, and only then does a
+tiny speech model (about 75 MB, downloaded on first start) check for her name.
+Nothing is sent anywhere until she hears "Suzy".
+
+> *Why not openWakeWord?* It only ships ready-made models for other names (e.g. "Hey
+> Jarvis"), and a "Suzy" model would need custom training. Recognising her name from
+> text works out of the box for "Suzy", "Hi Suzy" and "Hello Suzy" alike, even with the
+> request in the same sentence.
+
+**Push-to-talk also works:** press **Enter** on an empty line, or **Ctrl+Alt+S** from
+any window, then speak and pause.
 
 > The **first time** you start Suzy, she downloads her speech model (about 480 MB)
 > in the background. You can type to her while it downloads. After that,
@@ -276,6 +292,8 @@ Assistant ──► LLM router ──► Groq (retry once) ──► Gemini fall
 | Robotic voice | No internet, so Suzy switched to the Windows built-in voice. The natural voice comes back automatically when you're online again. |
 | *"I couldn't download my speech model"* | Suzy needs internet once to download it. Check your connection and restart her. |
 | Speech model fails to load (DLL error) | Install the *Microsoft Visual C++ Redistributable (x64)* from Microsoft's website, then restart Suzy. |
+| Suzy wakes up by mistake (TV, other people) | Raise `voice.wake_word.vad_threshold` (e.g. 0.7), or turn the wake word off with `voice.wake_word.enabled: false` and use Ctrl+Alt+S. |
+| Suzy doesn't react to "Suzy" | Speak clearly and pause briefly after her name. Try `voice.wake_word.model: base` (more accurate, a bit slower). Push-to-talk always works. |
 | Ctrl+Alt+S does nothing | Another app may own that shortcut. Pick another one in `voice.hotkey` (e.g. `ctrl+alt+space`). |
 | Anything else | Look in `logs/errors.log`. |
 
@@ -284,7 +302,7 @@ Assistant ──► LLM router ──► Groq (retry once) ──► Gemini fall
 - [x] **Phase 1**: terminal chat, LLM tool calling with Groq→Gemini failover, and 5 basic tools
 - [x] **Phase 2**: Suzy speaks (edge-tts, offline fallback voice) and listens with push-to-talk (faster-whisper)
 - [x] **Self-improvement**: Suzy adds abilities and fixes her own bugs (with tests, your yes, backups and auto-rollback)
-- [ ] **Phase 3**: "Hey Suzy" wake word, voice activity detection, interruption, follow-up mode
+- [x] **Phase 3**: "Suzy" wake word (Silero VAD + tiny Whisper), interruption, 8-second follow-up mode
 - [ ] **Phase 4**: the full tool set, the safety/confirmation layer, and tests for every tool
 - [ ] **Phase 5**: floating orb UI, chat panel, tray icon, settings window
 - [ ] **Phase 6**: offline fallback, auto-start, reminders, standalone `.exe` build

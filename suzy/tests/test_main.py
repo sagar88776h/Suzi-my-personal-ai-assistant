@@ -13,6 +13,17 @@ from core.config import Config
 from core.llm import GeminiProvider, GroqProvider, LLMRouter
 
 
+@pytest.fixture(autouse=True)
+def _no_background_work_in_tests(monkeypatch, request):
+    """Tests must never start a self-improvement job on the real code, or load / download
+    the wake-word model in the background."""
+    if "setup_self_improvement" not in request.node.name:
+        monkeypatch.setattr(main, "setup_self_improvement", lambda *args, **kwargs: None)
+    started = []
+    monkeypatch.setattr(main, "start_wake_listener_async", lambda *args, **kwargs: started.append(args))
+    return started
+
+
 def test_greeting_by_time_of_day():
     config = Config()
     assert main.greeting(config, datetime(2026, 1, 1, 8)).startswith("Good morning, Sagar.")
@@ -227,13 +238,6 @@ def test_mic_test_without_model(monkeypatch, capsys, tmp_path):
 
 
 # ----------------------------------------------------------------- self-improvement wiring
-@pytest.fixture(autouse=True)
-def _never_self_improve_the_live_code(monkeypatch, request):
-    """main.main() must never start a background self-improvement job on the real code in tests."""
-    if "setup_self_improvement" not in request.node.name:
-        monkeypatch.setattr(main, "setup_self_improvement", lambda *args, **kwargs: None)
-
-
 class _Session:
     def __init__(self):
         self.said = []
@@ -283,3 +287,21 @@ def test_setup_self_improvement_restart_hook(tmp_path, monkeypatch):
     manager.restart_pending = True
     ui.on_event("idle", None)
     assert exits == [main.RESTART_EXIT_CODE]
+
+
+def test_build_voice_starts_wake_word(monkeypatch, tmp_path, _no_background_work_in_tests):
+    from tests.fake_sounddevice import install_fake_sounddevice
+
+    install_fake_sounddevice(monkeypatch)
+    monkeypatch.setattr("core.stt.SpeechToText.load_async", lambda self: None)
+    monkeypatch.setitem(__import__("sys").modules, "pynput", None)
+    config = Config({"stt": {"models_dir": str(tmp_path)}})
+    assistant, _router, _registry = main.build_assistant(config)
+    voice = main.build_voice(config, assistant, main.TerminalUI())
+    assert voice.listener is not None and len(_no_background_work_in_tests) == 1
+    assert voice.listener.detector.stt.settings.model == "tiny"
+    assert voice.listener.detector.stt.settings.language == "en"
+    assert any("Hey Suzy, open Notepad" in n for n in voice.notes)
+
+    off = Config({"stt": {"models_dir": str(tmp_path)}, "voice": {"wake_word": {"enabled": False}}})
+    assert main.build_voice(off, assistant, main.TerminalUI()).listener is None

@@ -240,3 +240,100 @@ def test_nothing_heard_explains_silent_mic():
     session.listen_and_respond()
     info = [p for k, p in events if k == "info"][0]
     assert "pure silence" in info and "Privacy" in info
+
+
+# ----------------------------------------------------------------- wake-word events
+class FakeListener:
+    def __init__(self):
+        self.followups = 0
+        self.expecting = 0
+
+    def start_followup(self):
+        self.followups += 1
+
+    def expect_command(self):
+        self.expecting += 1
+
+
+def wake_session(text):
+    session, events = make_session(stt=FakeSTT(text=text))
+    session.listener = FakeListener()
+    return session, events
+
+
+def run_command(session, command):
+    from core.listener import VoiceCommand
+
+    session.on_listener_event("command", VoiceCommand(SPEECH, *command))
+    deadline = time.monotonic() + 3
+    while not any(k == "idle" for k, _ in session._test_events) and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+
+@pytest.fixture()
+def wake(monkeypatch):
+    def factory(text):
+        session, events = wake_session(text)
+        session._test_events = events
+        return session, events
+    return factory
+
+
+def test_wake_command_strips_the_name(wake):
+    session, events = wake("Hey Suzy, open Notepad.")
+    run_command(session, ("wake", "Hey Suzy, open Notepad"))
+    assert session.assistant.requests == ["open Notepad"]
+    assert ("heard", "open Notepad") in events
+    assert session.listener.followups == 1  # follow-up window opens after the answer
+
+
+def test_wake_command_falls_back_to_wake_model_text(wake):
+    session, _ = wake("Hey Suzy.")  # the main model lost the request...
+    run_command(session, ("wake", "Hey Suzy, what time is it"))  # ...but the wake model had it
+    assert session.assistant.requests == ["what time is it"]
+
+
+def test_name_only_waits_for_request(wake):
+    session, events = wake("Hello Suzy.")
+    run_command(session, ("wake", "Hello Suzy"))
+    assert session.assistant.requests == [] and session.listener.expecting == 1
+    assert ("listening", None) in events
+
+
+def test_followup_command_is_answered_without_name(wake):
+    session, _ = wake("and what about tomorrow")
+    run_command(session, ("followup",))
+    assert session.assistant.requests == ["and what about tomorrow"]
+
+
+def test_empty_followup_is_ignored_quietly(wake):
+    session, events = wake("")
+    run_command(session, ("followup",))
+    assert session.assistant.requests == [] and session.tts.spoken == []
+
+
+def test_interrupt_and_wake_events():
+    tts = FakeTTS(speak_seconds=5)
+    session, events = make_session(tts=tts)
+    session.cues = False
+    speaking = threading.Thread(target=session.say, args=("A long story...",))
+    speaking.start()
+    deadline = time.monotonic() + 2
+    while not tts.is_speaking and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert session.current_speech == "A long story..."
+    session.on_listener_event("interrupt", None)
+    speaking.join(2)
+    assert tts.spoken == [("A long story...", False)] and session.current_speech == ""
+    session.on_listener_event("wake", "Hi Suzy")
+    session.on_listener_event("timeout", None)
+    session.on_listener_event("error", "My microphone stopped working")
+    kinds_seen = [k for k, _ in events]
+    assert {"wake", "listening", "info", "error"} <= set(kinds_seen)
+
+
+def test_push_to_talk_opens_followup_too():
+    session, _ = make_session()
+    session.listener = FakeListener()
+    session.listen_and_respond()
+    assert session.listener.followups == 1
