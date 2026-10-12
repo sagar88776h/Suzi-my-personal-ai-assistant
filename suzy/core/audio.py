@@ -79,6 +79,7 @@ class RecordingSettings:
     min_speech_seconds: float = 0.3    # shorter "speech" is treated as noise
     energy_threshold: float = 0.006    # minimum loudness counted as speech (quiet laptop mics ~0.01)
     noise_multiplier: float = 2.5      # speech must be this much louder than the background
+    max_threshold: float = 0.03        # never require more than this (normal speech is ~0.03-0.2)
     calibration_seconds: float = 0.3   # measure background noise first
 
 
@@ -160,8 +161,12 @@ class Recorder:
                     if len(captured) * BLOCK_SECONDS <= settings.calibration_seconds:
                         noise_samples.append(level)
                         continue
-                    noise_floor = float(np.median(noise_samples)) if noise_samples else 0.0
-                    threshold = max(settings.energy_threshold, noise_floor * settings.noise_multiplier)
+                    # Use the quietest calibration blocks: if the user starts talking right at
+                    # the chime, the loud blocks are speech, not background noise. The cap
+                    # keeps a noisy calibration from setting a level normal speech never reaches.
+                    noise_floor = float(np.percentile(noise_samples, 20)) if noise_samples else 0.0
+                    threshold = min(max(settings.energy_threshold, noise_floor * settings.noise_multiplier),
+                                    max(settings.energy_threshold, settings.max_threshold))
                     self.last_threshold = threshold
                     if level >= threshold:
                         speech_seconds += duration

@@ -196,3 +196,24 @@ def test_measure_microphone_open_failure(monkeypatch):
     install_fake_sounddevice(monkeypatch, fail_open_input=True)
     with pytest.raises(AudioDeviceError):
         audio.measure_microphone(0.1)
+
+
+def test_speaking_right_at_the_chime_is_still_heard(monkeypatch):
+    """Regression: speech during the 0.3 s noise calibration made the threshold so high
+    that the rest of the sentence counted as silence ("Suzy talks but doesn't listen")."""
+    install_fake_sounddevice(monkeypatch, mic_signal=speech_signal(0.0, 1.5, 2.0, loudness=0.08))
+    captured = Recorder(fast_settings()).record()
+    assert captured is not None
+    assert 1.8 <= len(captured) / audio.SAMPLE_RATE <= 2.8  # ends at the pause, not at max length
+
+
+def test_loud_room_does_not_make_suzy_deaf(monkeypatch):
+    """Even with a noisy calibration, the speech threshold is capped at a level normal speech reaches."""
+    import numpy as np
+
+    rng = np.random.default_rng(1)
+    noisy = (rng.standard_normal(16_000 * 3) * 0.02).astype(np.float32)  # fan / traffic noise
+    noisy[8_000:32_000] += speech_signal(0.0, 1.5, 0.0, loudness=0.1)[:24_000]
+    install_fake_sounddevice(monkeypatch, mic_signal=noisy)
+    recorder = Recorder(fast_settings(max_seconds=3))
+    assert recorder.record() is not None and recorder.last_threshold <= 0.03
