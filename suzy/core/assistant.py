@@ -119,7 +119,10 @@ class Assistant:
         provider: str | None = None
 
         for _round in range(self.max_tool_rounds):
-            response = self.llm.chat(self.history, tools, self.system_prompt())
+            # If the main model is at its free-tier limit (e.g. while Suzy is coding on
+            # herself), answer with another model instead of making Sagar wait.
+            response = self.llm.chat(self.history, tools, self.system_prompt(),
+                                     options={"rotate_on_rate_limit": True})
             provider = response.provider
 
             if not response.tool_calls:

@@ -439,10 +439,11 @@ class DevAgent:
                 raise LLMUnavailableError([])
             self._compact(messages, budget)
             try:
+                # No model rotation here: the other model's allowance is kept free so
+                # Sagar's normal conversation keeps working while Suzy codes.
                 return self.llm.chat(messages, DEV_TOOLS, self.system_prompt,
                                      options={"max_tokens": max_output,
-                                              "reasoning_effort": self.settings.reasoning_effort,
-                                              "rotate_on_rate_limit": True})
+                                              "reasoning_effort": self.settings.reasoning_effort})
             except LLMUnavailableError as exc:
                 details = " ".join(e.detail for e in exc.errors).lower()
                 if "too large" in details and budget > 2000:

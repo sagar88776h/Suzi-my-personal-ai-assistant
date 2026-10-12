@@ -210,8 +210,8 @@ def test_agent_builds_a_feature(project):
     assert any("1| def search():" in r for r in tool_results)                    # read_file
     assert any("tools/web.py:1: def search():" in r for r in tool_results)       # search_code
     assert "writing tools/cricket.py" in progress and "running the full test suite" in progress
-    assert llm.calls[0]["options"] == {"max_tokens": 3000, "reasoning_effort": "medium",
-                                       "rotate_on_rate_limit": True}
+    # The coding agent never takes over the backup model (kept free for normal chat).
+    assert llm.calls[0]["options"] == {"max_tokens": 3000, "reasoning_effort": "medium"}
     assert "groq, psutil" in llm.calls[0]["system"]
 
 

@@ -21,7 +21,8 @@ class FakeLLM:
         self.seen: list[list[dict]] = []
         self.prompts: list[str] = []
 
-    def chat(self, messages, tools, system_prompt):
+    def chat(self, messages, tools, system_prompt, options=None):
+        self.options = options
         self.seen.append([dict(m) for m in messages])
         self.prompts.append(system_prompt)
         outcome = self.outcomes.pop(0)
@@ -174,3 +175,9 @@ def test_reset(reg):
     assistant.process("hello")
     assistant.reset()
     assert assistant.history == []
+
+
+def test_chat_may_use_another_model_when_main_one_is_busy(reg):
+    llm = FakeLLM(text("hi"))
+    make(llm, reg).process("hello")
+    assert llm.options == {"rotate_on_rate_limit": True}
