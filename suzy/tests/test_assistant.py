@@ -138,7 +138,8 @@ def test_unexpected_exception_never_escapes(reg):
 
 def test_single_llm_error_is_explained(reg):
     assistant = make(FakeLLM(LLMError("groq", LLMErrorKind.AUTH, "bad")), reg)
-    assert "rejected" in assistant.process("hi").text
+    reply = assistant.process("hi")
+    assert "rejected" in reply.text and reply.detail == "groq: auth - bad"
 
 
 def test_blank_input(reg):

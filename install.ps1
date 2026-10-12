@@ -119,8 +119,10 @@ function Request-ApiKey($label, $url, $prefix) {
     Write-Host ""
     Write-Host "    $label - free key at: $url" -ForegroundColor White
     if (Confirm-Default "Open that page in your browser now?") { Start-Process $url }
+    # $prefix may list several accepted prefixes separated by " or ".
     $key = (Read-Host "    Paste your $label key here (starts with $prefix), or just press Enter to skip").Trim().Trim('"').Trim("'")
-    if ($key -and -not $key.StartsWith($prefix)) {
+    $known = @($prefix -split ' or ' | Where-Object { $key.StartsWith($_) })
+    if ($key -and $known.Count -eq 0) {
         Write-Note "That doesn't start with $prefix - saving it anyway, double-check it if Suzy complains."
     }
     return $key
@@ -160,8 +162,23 @@ function Install-Suzy {
     & robocopy $source $InstallDir /E /XD .venv data logs __pycache__ /XF .env config.yaml /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "Copying Suzy's files failed (robocopy code $LASTEXITCODE)." }
     $configPath = Join-Path $InstallDir 'config.yaml'
+    $newConfig = Join-Path $source 'config.yaml'
     if (-not (Test-Path $configPath)) {
-        Copy-Item (Join-Path $source 'config.yaml') $configPath
+        Copy-Item $newConfig $configPath
+    } elseif (Select-String -Path $configPath -Pattern 'llama-3\.3-70b-versatile|^\s+model:\s*gemini-2\.5-flash' -Quiet) {
+        # Settings from the first release point at AI models that have since been retired.
+        # Swap in the new config.yaml, but keep the name Suzy calls you by.
+        $backup = Join-Path $InstallDir 'config.backup.yaml'
+        Copy-Item $configPath $backup -Force
+        $oldName = $null
+        $nameLine = Select-String -Path $configPath -Pattern '^\s+name:\s*([^#]+?)\s*(#.*)?$' | Select-Object -First 1
+        if ($nameLine) { $oldName = $nameLine.Matches[0].Groups[1].Value.Trim() }
+        $text = [IO.File]::ReadAllText($newConfig)
+        if ($oldName) {
+            $text = ([regex]'(?m)^(\s+name:[ \t]*)[^#\r\n]+?([ \t]*#)').Replace($text, "`${1}$oldName`${2}", 1)
+        }
+        [IO.File]::WriteAllText($configPath, $text, (New-Object Text.UTF8Encoding $false))
+        Write-Ok "Updated config.yaml to the current AI models (old one saved as config.backup.yaml)."
     } else {
         Write-Ok "Kept your existing config.yaml."
     }
@@ -200,7 +217,7 @@ function Install-Suzy {
         if (-not (Confirm-Default "Keep them?")) { $groqKey = ''; $geminiKey = '' }
     }
     if (-not $groqKey)   { $groqKey   = Request-ApiKey 'Groq (main brain)' 'https://console.groq.com/keys' 'gsk_' }
-    if (-not $geminiKey) { $geminiKey = Request-ApiKey 'Google Gemini (backup brain)' 'https://aistudio.google.com/apikey' 'AIza' }
+    if (-not $geminiKey) { $geminiKey = Request-ApiKey 'Google Gemini (backup brain)' 'https://aistudio.google.com/apikey' 'AIza or AQ.' }
     Write-EnvFile $envPath $groqKey $geminiKey
     if (-not $groqKey -and -not $geminiKey) {
         Write-Note "No keys saved - Suzy can't think without one. Re-run this installer or edit $envPath later."

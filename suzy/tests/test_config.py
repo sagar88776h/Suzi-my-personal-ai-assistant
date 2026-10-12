@@ -10,7 +10,7 @@ from core.config import DEFAULT_CONFIG, Config, deep_merge
 def test_defaults():
     config = Config()
     assert config.get("llm.provider") == "groq"
-    assert config.get("llm.groq.model") == "llama-3.3-70b-versatile"
+    assert config.get("llm.groq.models")[0] == "openai/gpt-oss-120b"
     assert config.get("missing.key", "fallback") == "fallback"
     assert config.get("llm.provider.deeper") is None
 

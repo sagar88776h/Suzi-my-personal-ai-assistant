@@ -39,16 +39,16 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "provider": "groq",
         "fallback_provider": "gemini",
         "temperature": 0.6,
-        "max_tokens": 1024,
+        "max_tokens": 2048,
         "request_timeout": 20,     # seconds
+        # Models are tried in order; if one is retired, the next one is used.
         "groq": {
-            "model": "llama-3.3-70b-versatile",
+            "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
+            "reasoning_effort": "low",   # gpt-oss only: low | medium | high
         },
         "gemini": {
-            "model": "gemini-2.5-flash",
-            # 0 disables "thinking" on Gemini 2.5 Flash for snappier replies.
-            # Set to null for models that do not support a thinking budget.
-            "thinking_budget": 0,
+            "models": ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash"],
+            "thinking_budget": None,     # None = model default; 0 disables thinking on 2.5 models
         },
     },
     "tools": {

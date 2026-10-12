@@ -112,6 +112,7 @@ def _status_error(cls, code):
         (_status_error(groq.RateLimitError, 429), LLMErrorKind.RATE_LIMIT),
         (_status_error(groq.InternalServerError, 503), LLMErrorKind.SERVER),
         (_status_error(groq.BadRequestError, 400), LLMErrorKind.BAD_REQUEST),
+        (_status_error(groq.NotFoundError, 404), LLMErrorKind.MODEL_UNAVAILABLE),
         (groq.APIConnectionError(request=httpx.Request("POST", "https://x")), LLMErrorKind.NETWORK),
         (groq.APITimeoutError(request=httpx.Request("POST", "https://x")), LLMErrorKind.NETWORK),
         (ValueError("weird"), LLMErrorKind.UNKNOWN),
@@ -207,7 +208,11 @@ def test_gemini_empty_candidates():
         (genai_errors.ClientError(403, {"error": {"message": "forbidden"}}), LLMErrorKind.AUTH),
         (genai_errors.ClientError(429, {"error": {"message": "quota"}}), LLMErrorKind.RATE_LIMIT),
         (genai_errors.ServerError(503, {"error": {"message": "overloaded"}}), LLMErrorKind.SERVER),
-        (genai_errors.ClientError(404, {"error": {"message": "model not found"}}), LLMErrorKind.BAD_REQUEST),
+        (genai_errors.ClientError(404, {"error": {"message": "model not found"}}), LLMErrorKind.MODEL_UNAVAILABLE),
+        (genai_errors.ClientError(400, {"error": {"message": "models/x is not supported for generateContent"}}),
+         LLMErrorKind.MODEL_UNAVAILABLE),
+        (genai_errors.ClientError(400, {"error": {"message": "Invalid JSON payload"}}), LLMErrorKind.BAD_REQUEST),
+        (genai_errors.ClientError(401, {"error": {"message": "ACCESS_TOKEN_TYPE_UNSUPPORTED"}}), LLMErrorKind.AUTH),
         (httpx.ConnectError("no route"), LLMErrorKind.NETWORK),
         (httpx.ReadTimeout("slow"), LLMErrorKind.NETWORK),
         (RuntimeError("weird"), LLMErrorKind.UNKNOWN),
@@ -229,10 +234,8 @@ class ScriptedProvider(BaseProvider):
         self.outcomes = list(outcomes)
         self.calls = 0
 
-    def chat(self, messages, tools, system_prompt):
+    def _chat_with_model(self, model, messages, tools, system_prompt):
         self.calls += 1
-        if not self.is_configured:
-            raise LLMError(self.name, LLMErrorKind.NOT_CONFIGURED, "no key")
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
             raise outcome
@@ -338,3 +341,105 @@ def test_tool_call_arguments_roundtrip_json():
             {"id": "a", "type": "function", "function": {"name": "set_volume", "arguments": json.dumps({"level": 30})}}]},
     ])
     assert contents[0].parts[0].function_call.args == {"level": 30}
+
+
+# ============================================================================ model fallback
+def test_groq_switches_to_next_model_when_retired():
+    request = httpx.Request("POST", "https://api.groq.com/openai/v1/chat/completions")
+    retired = groq.NotFoundError(
+        "The model `llama-3.3-70b-versatile` does not exist", body=None,
+        response=httpx.Response(404, request=request))
+
+    class Client(FakeGroqClient):
+        def _create(self, **kwargs):
+            self.calls.append(kwargs)
+            if kwargs["model"] == "llama-3.3-70b-versatile":
+                raise retired
+            return groq_reply("hi")
+
+    client = Client()
+    provider = GroqProvider(api_key="k", model=["llama-3.3-70b-versatile", "openai/gpt-oss-120b"])
+    provider._client = client
+    assert provider.chat(CONVERSATION[:1], TOOLS, "S").text == "hi"
+    assert provider.model == "openai/gpt-oss-120b"
+    # The working model is remembered: no more requests to the retired one.
+    provider.chat(CONVERSATION[:1], TOOLS, "S")
+    assert [c["model"] for c in client.calls] == ["llama-3.3-70b-versatile", "openai/gpt-oss-120b",
+                                                  "openai/gpt-oss-120b"]
+    # reasoning_effort is only sent to gpt-oss models.
+    assert "reasoning_effort" not in client.calls[0] and client.calls[1]["reasoning_effort"] == "low"
+
+
+def test_all_models_unavailable_raises():
+    error = genai_errors.ClientError(404, {"error": {"message": "models/x is not found"}})
+    client = FakeGeminiClient(error=error)
+    provider = GeminiProvider(api_key="k", model=["a", "b"])
+    provider._client = client
+    with pytest.raises(LLMError) as info:
+        provider.chat(CONVERSATION[:1], TOOLS, "S")
+    assert info.value.kind is LLMErrorKind.MODEL_UNAVAILABLE
+    assert [c["model"] for c in client.calls] == ["a", "b"]
+
+
+def test_other_errors_do_not_switch_models():
+    provider = make_groq(FakeGroqClient(error=_status_error(groq.RateLimitError, 429)))
+    provider.models = ["m1", "m2"]
+    with pytest.raises(LLMError):
+        provider.chat(CONVERSATION[:1], TOOLS, "S")
+    assert provider.model == "m1"
+
+
+def test_provider_requires_a_model():
+    with pytest.raises(ValueError):
+        GroqProvider(api_key="k", model=["", "  "])
+
+
+def test_build_provider_uses_legacy_model_first(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    config = Config({"llm": {"groq": {"model": "old-model", "models": ["new-a", "old-model", "new-b"],
+                                      "reasoning_effort": "medium"}}})
+    provider = build_provider("groq", config)
+    assert provider.models == ["old-model", "new-a", "new-b"] and provider.reasoning_effort == "medium"
+    assert build_provider("groq", Config()).models == ["openai/gpt-oss-120b", "openai/gpt-oss-20b"]
+    gemini = build_provider("gemini", Config())
+    assert gemini.models[0] == "gemini-flash-latest" and gemini.thinking_budget is None
+
+
+# ============================================================================ router health
+def test_router_moves_broken_provider_last():
+    auth = LLMError("groq", LLMErrorKind.AUTH, "bad key")
+    primary = ScriptedProvider("groq", [auth, "groq fixed"])
+    fallback = ScriptedProvider("gemini", ["g1", "g2"])
+    r, _ = router(primary, fallback)
+    assert r.chat([], [], "S").text == "g1"
+    assert r.chat([], [], "S").text == "g2"   # groq skipped while broken
+    assert primary.calls == 1
+
+
+def test_router_check_reports_each_provider():
+    primary = ScriptedProvider("groq", ["ready"])
+    fallback = ScriptedProvider("gemini", [LLMError("gemini", LLMErrorKind.AUTH, "401 bad key")])
+    missing = ScriptedProvider("other", [], configured=False)
+    r, _ = router(primary, fallback, missing)
+    statuses = r.check()
+    assert [(s.provider, s.ok) for s in statuses] == [("groq", True), ("gemini", False), ("other", False)]
+    assert statuses[0].describe() == "working (m)"
+    assert statuses[1].describe() == "NOT working - the API key was rejected"
+    assert statuses[2].describe() == "NOT working - no API key in the .env file"
+    assert r._ordered_providers()[0].name == "groq"
+
+
+def test_router_check_with_no_providers():
+    assert LLMRouter([]).check() == []
+
+
+def test_technical_summary_keeps_latest_error_per_provider():
+    error = LLMUnavailableError([
+        LLMError("groq", LLMErrorKind.SERVER, "first"),
+        LLMError("groq", LLMErrorKind.MODEL_UNAVAILABLE, "model   x\n does not exist"),
+        LLMError("gemini", LLMErrorKind.AUTH, "y" * 300),
+    ])
+    summary = error.technical_summary()
+    assert summary.startswith("groq: model_unavailable - model x does not exist; gemini: auth - yyy")
+    assert summary.endswith("...")
+    assert "Re-run the installer" in LLMUnavailableError([error.errors[1]]).user_message()

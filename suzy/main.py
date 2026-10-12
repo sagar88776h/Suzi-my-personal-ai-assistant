@@ -6,6 +6,7 @@ Usage:
     python main.py                     interactive chat
     python main.py --once "open notepad"   run a single command and exit
     python main.py --quiet             hide the tool-call trace
+    python main.py --check             only test the API keys / models and exit
 """
 
 from __future__ import annotations
@@ -17,7 +18,7 @@ from datetime import datetime
 
 from core.assistant import Assistant, AssistantReply
 from core.config import Config
-from core.llm import LLMRouter
+from core.llm import LLMRouter, ProviderStatus
 from core.logging_setup import setup_logging
 from tools import apps
 from tools.registry import ToolRegistry, load_all_tools
@@ -69,6 +70,25 @@ def startup_report(config: Config, router: LLMRouter) -> list[str]:
     return problems
 
 
+def run_brain_check(router: LLMRouter) -> list[ProviderStatus]:
+    """Test every configured brain and print a plain-language status line for each."""
+    if not router.configured_providers:
+        return []  # startup_report already explains that no key is set
+    print("Suzy: Checking my brain connections...")
+    statuses = router.check()
+    for status in statuses:
+        print(f"      {status.provider.title():<7}: {status.describe()}")
+        if not status.ok and status.error is not None:
+            log.error("Brain check failed for %s: %s", status.provider, status.error)
+    if statuses and not any(s.ok for s in statuses):
+        print("Suzy: Neither brain is working, so I can't answer yet. Technical details:")
+        for status in statuses:
+            if status.error is not None:
+                print(f"      {status.provider}: {' '.join(status.error.detail.split())[:220]}")
+    print()
+    return statuses
+
+
 def greeting(config: Config, now: datetime | None = None) -> str:
     hour = (now or datetime.now()).hour
     part = "morning" if 5 <= hour < 12 else "afternoon" if 12 <= hour < 17 else "evening"
@@ -80,6 +100,8 @@ def print_reply(reply: AssistantReply, show_actions: bool) -> None:
         for action in reply.actions:
             status = "ok" if action.result.success else "failed"
             print(f"   -> {action.tool}({action.arguments}) [{status}]")
+        if reply.error and reply.detail:
+            print(f"   (details: {reply.detail})")
     print(f"Suzy: {reply.text}\n")
 
 
@@ -123,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--once", metavar="TEXT", help="run a single command and exit")
     parser.add_argument("--quiet", action="store_true", help="hide the tool-call trace")
     parser.add_argument("--debug", action="store_true", help="show debug logs in the console")
+    parser.add_argument("--check", action="store_true", help="test the API keys and models, then exit")
+    parser.add_argument("--no-check", action="store_true", help="skip the brain check at startup")
     args = parser.parse_args(argv)
 
     _configure_console()
@@ -131,7 +155,7 @@ def main(argv: list[str] | None = None) -> int:
         level=str(config.get("logging.level", "DEBUG")),
         max_bytes=int(config.get("logging.max_bytes", 2_000_000)),
         backup_count=int(config.get("logging.backup_count", 5)),
-        console_level="DEBUG" if args.debug else "ERROR",
+        console_level="DEBUG" if args.debug else "CRITICAL",  # friendly messages cover the rest
     )
     log.info("Suzy starting")
 
@@ -144,6 +168,12 @@ def main(argv: list[str] | None = None) -> int:
 
     for problem in startup_report(config, router):
         print(f"Suzy: Heads up - {problem}")
+
+    if args.check:
+        statuses = run_brain_check(router)
+        return 0 if any(s.ok for s in statuses) else 1
+    if not args.no_check and not args.once:
+        run_brain_check(router)
 
     if args.once:
         print_reply(assistant.process(args.once), show_actions=not args.quiet)

@@ -36,6 +36,7 @@ class AssistantReply:
     actions: list[ActionRecord] = field(default_factory=list)
     provider: str | None = None
     error: bool = False
+    detail: str | None = None  # technical reason when something failed
 
 
 class Assistant:
@@ -88,7 +89,7 @@ class Assistant:
             try:
                 reply = self._run(actions)
             except (LLMUnavailableError, LLMError) as exc:
-                log.warning("LLM unavailable: %s", exc)
+                log.error("LLM unavailable: %s", exc)
                 reply = self._recover(checkpoint, actions, exc)
             except Exception:  # noqa: BLE001 - the assistant must never crash
                 log.exception("Unexpected error while processing %r", text)
@@ -152,13 +153,13 @@ class Assistant:
             return AssistantReply(reply_text, actions, None, error=True)
 
         del self.history[checkpoint:]  # drop the unanswered user message
+        if isinstance(exc, LLMError):
+            exc = LLMUnavailableError([exc])
         if isinstance(exc, LLMUnavailableError):
-            message = exc.user_message()
-        elif isinstance(exc, LLMError):
-            message = LLMUnavailableError([exc]).user_message()
-        else:
-            message = "Oops, something went wrong on my side. Could you try that again?"
-        return AssistantReply(message, [], None, error=True)
+            return AssistantReply(exc.user_message(), [], None, error=True,
+                                  detail=exc.technical_summary() or None)
+        message = "Oops, something went wrong on my side. Could you try that again?"
+        return AssistantReply(message, [], None, error=True, detail="see logs/errors.log")
 
     @staticmethod
     def _summarize(actions: list[ActionRecord]) -> str:

@@ -56,3 +56,45 @@ def test_terminal_chat_handles_ctrl_c(monkeypatch, capsys):
     monkeypatch.setattr("builtins.input", interrupt)
     assert main.main([]) == 0
     assert "Bye for now" in capsys.readouterr().out
+
+
+class StubRouter:
+    """Stands in for LLMRouter in startup tests."""
+
+    def __init__(self, statuses):
+        self._statuses = statuses
+        self.providers = [GroqProvider("k", "m")]
+
+    @property
+    def configured_providers(self):
+        return ["groq"]
+
+    def check(self):
+        return self._statuses
+
+
+def test_brain_check_output(capsys):
+    from core.llm import LLMError, LLMErrorKind, ProviderStatus
+
+    bad = ProviderStatus("groq", False, "m", LLMError("groq", LLMErrorKind.MODEL_UNAVAILABLE, "404 gone"))
+    main.run_brain_check(StubRouter([bad]))
+    out = capsys.readouterr().out
+    assert "Groq   : NOT working - none of the configured models are available" in out
+    assert "groq: 404 gone" in out
+
+    main.run_brain_check(StubRouter([ProviderStatus("groq", True, "openai/gpt-oss-120b")]))
+    out = capsys.readouterr().out
+    assert "working (openai/gpt-oss-120b)" in out and "Technical details" not in out
+
+
+def test_check_flag_exit_code(monkeypatch, capsys):
+    for var in ("GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.setenv(var, "")
+    assert main.main(["--check"]) == 1
+
+
+def test_print_reply_shows_detail(capsys):
+    main.print_reply(main.AssistantReply("Oops.", error=True, detail="groq: auth - 401"), show_actions=True)
+    assert "(details: groq: auth - 401)" in capsys.readouterr().out
+    main.print_reply(main.AssistantReply("Oops.", error=True, detail="x"), show_actions=False)
+    assert "details" not in capsys.readouterr().out

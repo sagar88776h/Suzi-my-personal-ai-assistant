@@ -148,6 +148,7 @@ Other ways to run it:
 python main.py --once "open calculator"   # run a single command and exit
 python main.py --quiet                    # hide the "-> open_app(...)" action trace
 python main.py --debug                    # show debug logs in the console
+python main.py --check                    # test the API keys and AI models, then exit
 ```
 
 ### Step 8 — Run the tests (optional)
@@ -194,6 +195,9 @@ you type ──► Assistant ──► LLM router ──► Groq (retry once) �
 
 | Problem | Fix |
 |---|---|
+| Not sure what's wrong with the brain | Run `python main.py --check` (or just start Suzy). She tests each brain and says exactly what's wrong. |
+| *"The AI models in my settings aren't available any more"* | The provider retired a model. Re-run the installer, or put a current model name first under `llm.groq.models` / `llm.gemini.models` in `config.yaml`. |
+| Gemini says the key was rejected (key starts with `AQ.`) | Some new-format Google keys are refused by the API right now. Groq on its own is enough. You can also create a fresh key later. |
 | *"I don't have a working API key yet"* | Create `.env` (Step 6) and restart Suzy. |
 | *"My API key was rejected"* | Re-copy the key with no spaces or quotes, or create a new one. |
 | *"I can't reach the internet"* | Check your connection. Phase 6 adds offline commands. |
