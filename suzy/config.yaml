@@ -34,6 +34,8 @@ llm:
 voice:
   enabled: true           # microphone + push-to-talk
   hotkey: ctrl+alt+s      # push-to-talk from any window
+  input_device: null      # null = Windows default mic, or part of its name, e.g. "Realtek" (see: --mic-test)
+  energy_threshold: 0.006 # how loud counts as speech; lower = more sensitive (see: --mic-test)
   max_record_seconds: 15  # longest single request
   silence_seconds: 1.2    # how long a pause ends what you're saying
   no_speech_timeout: 6    # stop listening if you say nothing for this long

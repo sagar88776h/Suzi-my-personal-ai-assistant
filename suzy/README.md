@@ -161,6 +161,7 @@ python main.py --no-voice                 # no microphone or hotkey (typing only
 python main.py --quiet                    # hide the "-> open_app(...)" action trace
 python main.py --debug                    # show debug logs in the console
 python main.py --check                    # test the API keys and AI models, then exit
+python main.py --mic-test                 # test the microphone and speech recognition
 ```
 
 ### Step 8 — Run the tests (optional)
@@ -228,7 +229,7 @@ Assistant ──► LLM router ──► Groq (retry once) ──► Gemini fall
 | *"I can't reach the internet"* | Check your connection. Phase 6 adds offline commands. |
 | *"I've hit my free usage limit"* | Wait a minute. Suzy also switches to Gemini automatically if that key is set. |
 | *"I couldn't find an app called X"* | Use the name shown in the Start menu, or add the app's folder to `tools.apps.extra_search_dirs` in `config.yaml`. |
-| Suzy doesn't hear me | Check that your mic is the default *input* in Windows Sound settings, and that *Settings → Privacy & security → Microphone* allows desktop apps. Speak after the chime. |
+| Suzy doesn't hear me | Run the **mic test**: double-click **Suzy Mic Test** on your desktop, or run `python main.py --mic-test`. It lists your mics, shows a live level meter, tells you exactly what's wrong (Windows privacy block, wrong mic, too quiet), and checks speech recognition. |
 | Suzy stops listening too early / too late | Raise or lower `voice.silence_seconds` in `config.yaml` (default 1.2). |
 | Suzy misunderstands words | Set `stt.beam_size: 5` (a bit slower), or `stt.model: medium` (much slower but more accurate). For English only, set `stt.language: en`. |
 | Change her voice or speed | `tts.voice`, `tts.rate` (`"+15%"` = faster) and `tts.pitch` in `config.yaml`. |

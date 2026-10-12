@@ -77,7 +77,8 @@ class RecordingSettings:
     silence_seconds: float = 1.2       # pause that ends the utterance
     no_speech_timeout: float = 6.0     # give up if nothing is said at all
     min_speech_seconds: float = 0.3    # shorter "speech" is treated as noise
-    energy_threshold: float = 0.015    # minimum loudness counted as speech
+    energy_threshold: float = 0.006    # minimum loudness counted as speech (quiet laptop mics ~0.01)
+    noise_multiplier: float = 2.5      # speech must be this much louder than the background
     calibration_seconds: float = 0.3   # measure background noise first
 
 
@@ -94,6 +95,9 @@ class Recorder:
         self.device = device
         self._stop = threading.Event()
         self._active = threading.Event()
+        # Diagnostics from the last recording, used to explain "I didn't hear anything".
+        self.last_peak = 0.0
+        self.last_threshold = self.settings.energy_threshold
 
     @property
     def is_recording(self) -> bool:
@@ -114,6 +118,8 @@ class Recorder:
             blocks.put(indata[:, 0].copy())
 
         self._stop.clear()
+        self.last_peak = 0.0
+        self.last_threshold = settings.energy_threshold
         block_size = int(SAMPLE_RATE * BLOCK_SECONDS)
         try:
             stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
@@ -146,6 +152,7 @@ class Recorder:
                         continue
                     captured.append(block)
                     level = rms_level(block)
+                    self.last_peak = max(self.last_peak, level)
                     if level_callback is not None:
                         level_callback(level)
 
@@ -154,7 +161,8 @@ class Recorder:
                         noise_samples.append(level)
                         continue
                     noise_floor = float(np.median(noise_samples)) if noise_samples else 0.0
-                    threshold = max(settings.energy_threshold, noise_floor * 3.0)
+                    threshold = max(settings.energy_threshold, noise_floor * settings.noise_multiplier)
+                    self.last_threshold = threshold
                     if level >= threshold:
                         speech_seconds += duration
                         silence_run = 0.0
@@ -179,6 +187,81 @@ class Recorder:
         if rms_level(audio) < settings.energy_threshold / 3:
             return None  # stopped early but nothing audible was said
         return audio
+
+
+def describe_quiet_recording(peak: float, threshold: float) -> str:
+    """Explain why nothing was heard, based on the loudest sound the mic picked up."""
+    if peak < 0.0005:
+        return ("I didn't hear anything - my microphone is giving me pure silence. Windows may be "
+                "blocking it: check Settings > Privacy & security > Microphone > 'Let desktop apps "
+                "access your microphone', and that the right mic is selected.")
+    if peak < threshold:
+        return (f"I didn't hear anything - your microphone is very quiet (loudest sound {peak:.3f}, "
+                f"I need about {threshold:.3f}). Speak closer, raise the mic level in Windows Sound "
+                "settings, or lower voice.energy_threshold in config.yaml.")
+    return "I didn't hear anything."
+
+
+# =========================================================================== devices
+def list_input_devices() -> list[tuple[int, str, bool]]:
+    """All microphones as (index, name, is_default). Raises AudioDeviceError."""
+    sd = _sd()
+    try:
+        devices = sd.query_devices()
+        default_index = sd.default.device[0]
+    except Exception as exc:  # noqa: BLE001
+        raise AudioDeviceError(f"I couldn't list the microphones ({exc}).") from exc
+    result = []
+    for index, info in enumerate(devices):
+        if info.get("max_input_channels", 0) > 0:
+            result.append((index, info["name"], index == default_index))
+    return result
+
+
+def resolve_input_device(spec: int | str | None) -> int | None:
+    """Turn config's voice.input_device (None, an index, or part of a name) into a device index."""
+    if spec is None or (isinstance(spec, str) and not spec.strip()):
+        return None
+    if isinstance(spec, int) or (isinstance(spec, str) and spec.strip().isdigit()):
+        return int(spec)
+    wanted = str(spec).strip().lower()
+    for index, name, _default in list_input_devices():
+        if wanted in name.lower():
+            return index
+    raise AudioDeviceError(f"I couldn't find a microphone matching '{spec}' (voice.input_device in config.yaml).")
+
+
+@dataclass
+class MicMeasurement:
+    peak: float
+    average: float
+    audio: np.ndarray  # the recording itself (16 kHz mono float32)
+
+
+def measure_microphone(seconds: float, device: int | None = None,
+                       level_callback: LevelCallback | None = None) -> MicMeasurement:
+    """Record for ``seconds`` and measure how loud it was. Raises AudioDeviceError."""
+    sd = _sd()
+    levels: list[float] = []
+    blocks: list[np.ndarray] = []
+
+    def on_audio(indata: np.ndarray, _frames: int, _time: Any, _status: Any) -> None:
+        blocks.append(indata[:, 0].copy())
+        level = rms_level(indata[:, 0])
+        levels.append(level)
+        if level_callback is not None:
+            level_callback(level)
+
+    try:
+        stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32",
+                                blocksize=int(SAMPLE_RATE * BLOCK_SECONDS), device=device, callback=on_audio)
+        with stream:
+            time.sleep(seconds)
+    except Exception as exc:  # noqa: BLE001
+        raise AudioDeviceError(f"I couldn't open the microphone ({exc}).") from exc
+    if not levels:
+        return MicMeasurement(0.0, 0.0, np.zeros(0, np.float32))
+    return MicMeasurement(max(levels), float(np.mean(levels)), np.concatenate(blocks).astype(np.float32))
 
 
 # =========================================================================== playback

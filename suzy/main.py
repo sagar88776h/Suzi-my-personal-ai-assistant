@@ -10,6 +10,7 @@ Usage:
     python main.py --no-voice             no microphone / hotkey (typing only)
     python main.py --quiet                hide the tool-call trace
     python main.py --check                only test the API keys / models and exit
+    python main.py --mic-test             check the microphone (lists mics, shows your voice level)
 """
 
 from __future__ import annotations
@@ -23,12 +24,20 @@ from datetime import datetime
 from typing import Any
 
 from core.assistant import Assistant, AssistantReply
-from core.audio import Recorder, RecordingSettings, check_devices
+from core.audio import (
+    AudioDeviceError,
+    Recorder,
+    RecordingSettings,
+    check_devices,
+    list_input_devices,
+    measure_microphone,
+    resolve_input_device,
+)
 from core.config import Config
 from core.hotkey import GlobalHotkey
 from core.llm import LLMRouter, ProviderStatus
 from core.logging_setup import setup_logging
-from core.stt import SpeechToText, STTSettings
+from core.stt import SpeechToText, STTError, STTSettings
 from core.tts import TextToSpeech, TTSSettings
 from core.voice import VoiceSession
 from tools import apps
@@ -100,13 +109,20 @@ def build_voice(config: Config, assistant: Assistant, ui: TerminalUI,
             listen = False
 
     stt = recorder = None
+    mic_device = None
+    if listen:
+        try:
+            mic_device = resolve_input_device(config.get("voice.input_device"))
+        except AudioDeviceError as exc:
+            problems.append(f"{exc} Using the Windows default microphone instead.")
     if listen:
         stt = SpeechToText(STTSettings.from_config(config))
         recorder = Recorder(RecordingSettings(
             max_seconds=float(config.get("voice.max_record_seconds", 15)),
             silence_seconds=float(config.get("voice.silence_seconds", 1.2)),
             no_speech_timeout=float(config.get("voice.no_speech_timeout", 6)),
-        ))
+            energy_threshold=float(config.get("voice.energy_threshold", 0.006)),
+        ), device=mic_device)
         if not stt.is_downloaded:
             notes.append(f"First run: downloading my speech model ('{stt.settings.model}', about 480 MB) "
                          "in the background. You can type meanwhile.")
@@ -128,7 +144,10 @@ def build_voice(config: Config, assistant: Assistant, ui: TerminalUI,
     if tts_settings.enabled and devices is not None and devices.speaker:
         notes.append(f"Voice: {tts_settings.voice}, speaking on {devices.speaker}.")
     if listen and devices is not None:
-        notes.append(f"Listening with: {devices.microphone}.")
+        mic_name = devices.microphone
+        if mic_device is not None:
+            mic_name = next((n for i, n, _d in list_input_devices() if i == mic_device), mic_name)
+        notes.append(f"Listening with: {mic_name}.")
     return VoiceSetup(session, hotkey, notes, problems)
 
 
@@ -292,6 +311,87 @@ def run_terminal_chat(voice: VoiceSetup, registry: ToolRegistry, ui: TerminalUI)
             print("\nSuzy: Okay, stopped.\n")
 
 
+# =========================================================================== mic test
+def _meter(level: float, width: int = 40) -> str:
+    filled = min(width, int(level / 0.1 * width))  # 0.1 RMS = full bar (loud speech)
+    return "#" * filled + "-" * (width - filled)
+
+
+def run_mic_test(config: Config, seconds: float = 5.0) -> int:
+    """Interactive microphone check: lists mics, shows a live level meter, gives advice."""
+    print("Suzy microphone test\n")
+    try:
+        mics = list_input_devices()
+    except AudioDeviceError as exc:
+        print(f"  {exc}")
+        return 1
+    if not mics:
+        print("  No microphones found at all. Plug one in, or check Windows Sound settings.")
+        return 1
+    print("  Microphones on this PC:")
+    for index, name, is_default in mics:
+        print(f"    [{index}] {name}{'   <- Windows default' if is_default else ''}")
+
+    spec = config.get("voice.input_device")
+    try:
+        device = resolve_input_device(spec)
+    except AudioDeviceError as exc:
+        print(f"\n  {exc}")
+        device = None
+    chosen = next((n for i, n, d in mics if (i == device if device is not None else d)), "default")
+    print(f"\n  Testing: {chosen}")
+    print(f"  Speak normally for {seconds:.0f} seconds, e.g. \"Hey Suzy, open Notepad\"...\n")
+
+    def show(level: float) -> None:
+        print(f"\r  level [{_meter(level)}] {level:.3f} ", end="", flush=True)
+
+    try:
+        measurement = measure_microphone(seconds, device, show)
+    except AudioDeviceError as exc:
+        print(f"\n\n  {exc}")
+        return 1
+    peak, average = measurement.peak, measurement.average
+    threshold = float(config.get("voice.energy_threshold", 0.006))
+    print(f"\n\n  Loudest: {peak:.3f}   average: {average:.3f}   Suzy needs speech above: {threshold:.3f}")
+    if peak < 0.0005:
+        print("  RESULT: pure silence. Windows is probably blocking the microphone, or it's muted.")
+        print("    1. Settings > Privacy & security > Microphone: turn on 'Microphone access' AND")
+        print("       'Let desktop apps access your microphone'.")
+        print("    2. Settings > System > Sound > Input: pick your mic and check it isn't muted.")
+        print("    3. Or choose another mic from the list above: set voice.input_device in config.yaml")
+        print("       to its number or part of its name, then run this test again.")
+        return 1
+    if peak < threshold * 1.5:
+        suggested = max(0.001, round(peak / 2, 4))
+        print("  RESULT: the mic works but your voice is very quiet for me.")
+        print("    Raise the mic volume: Settings > System > Sound > (your mic) > Input volume to 80-100,")
+        print(f"    or set voice.energy_threshold: {suggested} in config.yaml.")
+        return 1
+    print("  RESULT: your microphone sounds good - Suzy should hear you fine.")
+    return _transcription_check(config, measurement.audio)
+
+
+def _transcription_check(config: Config, audio: Any) -> int:
+    """Run the mic-test recording through Whisper so the whole listening chain is verified."""
+    stt = SpeechToText(STTSettings.from_config(config))
+    if not stt.is_downloaded:
+        print("\n  (Speech model not downloaded yet - start Suzy once to download it, then re-run this test\n"
+              "   to also check speech recognition.)")
+        return 0
+    print("\n  Checking speech recognition on your recording...")
+    try:
+        transcript = stt.transcribe(audio)
+    except STTError as exc:
+        print(f"  Speech recognition FAILED: {exc}")
+        return 1
+    if transcript.text:
+        print(f"  I heard: \"{transcript.text}\"  ({transcript.language}, {transcript.seconds:.1f}s)")
+        print("  Everything works. If that's what you said, Suzy is ready to listen!")
+    else:
+        print("  The mic level is fine but I couldn't make out words - speak clearly during the test.")
+    return 0
+
+
 # =========================================================================== main
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Suzy - your desktop AI assistant")
@@ -302,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-check", action="store_true", help="skip the brain check at startup")
     parser.add_argument("--mute", action="store_true", help="don't speak replies out loud")
     parser.add_argument("--no-voice", action="store_true", help="disable the microphone and hotkey")
+    parser.add_argument("--mic-test", action="store_true", help="test the microphone and exit")
     args = parser.parse_args(argv)
 
     _configure_console()
@@ -313,6 +414,9 @@ def main(argv: list[str] | None = None) -> int:
         console_level="DEBUG" if args.debug else "CRITICAL",  # friendly messages cover the rest
     )
     log.info("Suzy starting")
+
+    if args.mic_test:
+        return run_mic_test(config)
 
     try:
         assistant, router, registry = build_assistant(config)

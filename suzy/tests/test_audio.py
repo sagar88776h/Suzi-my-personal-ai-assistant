@@ -148,3 +148,51 @@ def test_play_cue_never_raises(monkeypatch):
     install_fake_sounddevice(monkeypatch, fail_open_output=True)
     audio.play_cue("start")
     audio.play_cue("stop")
+
+
+# ----------------------------------------------------------------- diagnostics
+def test_recorder_reports_peak_for_quiet_mic(monkeypatch):
+    install_fake_sounddevice(monkeypatch, mic_signal=speech_signal(0.5, 1.0, 1.0, loudness=0.004))
+    recorder = Recorder(fast_settings(no_speech_timeout=0.5))
+    assert recorder.record() is None
+    assert 0.002 < recorder.last_peak < recorder.last_threshold
+
+
+def test_quiet_mic_is_now_heard_with_default_sensitivity(monkeypatch):
+    """A laptop mic at RMS ~0.01 was ignored by the old 0.015 threshold."""
+    install_fake_sounddevice(monkeypatch, mic_signal=speech_signal(0.5, 1.0, 2.0, loudness=0.014))
+    assert Recorder(RecordingSettings(silence_seconds=0.6, no_speech_timeout=2)).record() is not None
+
+
+@pytest.mark.parametrize(
+    "peak, phrase",
+    [(0.0, "pure silence"), (0.002, "very quiet"), (0.05, "didn't hear anything.")],
+)
+def test_describe_quiet_recording(peak, phrase):
+    assert phrase in audio.describe_quiet_recording(peak, 0.006)
+
+
+def test_list_and_resolve_input_devices(monkeypatch):
+    install_fake_sounddevice(monkeypatch)
+    assert audio.list_input_devices() == [(0, "Fake Mic", True), (1, "USB Headset Microphone", False)]
+    assert audio.resolve_input_device(None) is None
+    assert audio.resolve_input_device("  ") is None
+    assert audio.resolve_input_device(1) == 1
+    assert audio.resolve_input_device("1") == 1
+    assert audio.resolve_input_device("usb headset") == 1
+    with pytest.raises(AudioDeviceError, match="Bluetooth"):
+        audio.resolve_input_device("Bluetooth")
+
+
+def test_measure_microphone(monkeypatch):
+    install_fake_sounddevice(monkeypatch, mic_signal=speech_signal(0.1, 0.5, 0.0), realtime=0.01)
+    levels = []
+    result = audio.measure_microphone(0.4, level_callback=levels.append)
+    assert result.peak > 0.1 and 0 < result.average < result.peak and levels
+    assert result.audio.dtype == np.float32 and len(result.audio) > 0
+
+
+def test_measure_microphone_open_failure(monkeypatch):
+    install_fake_sounddevice(monkeypatch, fail_open_input=True)
+    with pytest.raises(AudioDeviceError):
+        audio.measure_microphone(0.1)

@@ -231,3 +231,12 @@ def test_say_async(enabled):
     session.tts.settings.enabled = enabled
     session.say_async("Hello Sagar").join(2)
     assert (session.tts.spoken == [("Hello Sagar", True)]) is enabled
+
+
+def test_nothing_heard_explains_silent_mic():
+    recorder = FakeRecorder(audio=None)
+    recorder.last_peak, recorder.last_threshold = 0.0, 0.006
+    session, events = make_session(recorder=recorder)
+    session.listen_and_respond()
+    info = [p for k, p in events if k == "info"][0]
+    assert "pure silence" in info and "Privacy" in info

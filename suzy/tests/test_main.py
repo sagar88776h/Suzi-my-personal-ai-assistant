@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import tempfile
 from datetime import datetime
+from pathlib import Path
 
 import main
 from core.config import Config
@@ -147,3 +149,76 @@ def test_build_voice_with_fake_devices(monkeypatch, tmp_path):
     assert voice.session.can_listen and voice.hotkey is not None and ui.hotkey_label == "Ctrl+Alt+S"
     assert any("downloading my speech model" in n for n in voice.notes)
     assert any("Fake Mic" in n for n in voice.notes) and voice.problems == []
+
+
+def _mic_test(monkeypatch, capsys, loudness, config=None):
+    import numpy as np
+
+    from tests.fake_sounddevice import install_fake_sounddevice, speech_signal
+
+    # loudness 0 = exact digital silence, which is what a privacy-blocked Windows mic delivers
+    signal = np.zeros(16_000, np.float32) if loudness == 0 else speech_signal(0.1, 1.0, 0.0, loudness=loudness)
+    install_fake_sounddevice(monkeypatch, mic_signal=signal, realtime=0.005)
+    config = config or Config()
+    if config.get("stt.models_dir") == "models":
+        # Never load the real speech model in tests (it exists on a PC where Suzy already ran).
+        config.set("stt.models_dir", str(Path(tempfile.mkdtemp()) / "no-models"))
+    code = main.run_mic_test(config, seconds=0.3)
+    return code, capsys.readouterr().out
+
+
+def test_mic_test_good(monkeypatch, capsys):
+    code, out = _mic_test(monkeypatch, capsys, loudness=0.2)
+    assert code == 0 and "[0] Fake Mic   <- Windows default" in out and "sounds good" in out
+
+
+def test_mic_test_silent(monkeypatch, capsys):
+    code, out = _mic_test(monkeypatch, capsys, loudness=0.0)
+    assert code == 1 and "pure silence" in out and "Privacy" in out
+
+
+def test_mic_test_quiet(monkeypatch, capsys):
+    code, out = _mic_test(monkeypatch, capsys, loudness=0.005)
+    assert code == 1 and "very quiet" in out and "voice.energy_threshold:" in out
+
+
+def test_mic_test_chosen_device(monkeypatch, capsys):
+    code, out = _mic_test(monkeypatch, capsys, 0.2, Config({"voice": {"input_device": "headset"}}))
+    assert "Testing: USB Headset Microphone" in out
+
+
+def test_mic_test_flag(monkeypatch, capsys):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "sounddevice", None)
+    assert main.main(["--mic-test"]) == 1
+    assert "audio system" in capsys.readouterr().out
+
+
+def test_build_voice_bad_input_device(monkeypatch, tmp_path):
+    from tests.fake_sounddevice import install_fake_sounddevice
+
+    install_fake_sounddevice(monkeypatch)
+    monkeypatch.setattr("core.stt.SpeechToText.load_async", lambda self: None)
+    monkeypatch.setitem(__import__("sys").modules, "pynput", None)
+    config = Config({"voice": {"input_device": "Bluetooth"}, "stt": {"models_dir": str(tmp_path)}})
+    assistant, _router, _registry = main.build_assistant(config)
+    voice = main.build_voice(config, assistant, main.TerminalUI())
+    assert any("Bluetooth" in p and "default microphone" in p for p in voice.problems)
+    assert voice.session.can_listen and voice.session.recorder.device is None
+
+
+def test_mic_test_runs_speech_recognition(monkeypatch, capsys, tmp_path):
+    from core.stt import Transcript
+
+    (tmp_path / "faster-whisper-small").mkdir()
+    (tmp_path / "faster-whisper-small" / "model.bin").write_bytes(b"x")
+    monkeypatch.setattr("core.stt.SpeechToText.transcribe",
+                        lambda self, audio: Transcript("Hey Suzy, open Notepad.", "en", 0.9, 0.8))
+    code, out = _mic_test(monkeypatch, capsys, 0.2, Config({"stt": {"models_dir": str(tmp_path)}}))
+    assert code == 0 and 'I heard: "Hey Suzy, open Notepad."' in out
+
+
+def test_mic_test_without_model(monkeypatch, capsys, tmp_path):
+    code, out = _mic_test(monkeypatch, capsys, 0.2, Config({"stt": {"models_dir": str(tmp_path)}}))
+    assert code == 0 and "not downloaded yet" in out

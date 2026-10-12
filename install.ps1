@@ -245,6 +245,16 @@ function Install-Suzy {
         'pause'
     ) -join "`r`n"
     [IO.File]::WriteAllText($launcher, $bat, (New-Object Text.ASCIIEncoding))
+    $micLauncher = Join-Path $InstallDir 'Suzy Mic Test.bat'
+    $micBat = @(
+        '@echo off',
+        'title Suzy microphone test',
+        'cd /d "%~dp0"',
+        '".venv\Scripts\python.exe" main.py --mic-test',
+        'echo.',
+        'pause'
+    ) -join "`r`n"
+    [IO.File]::WriteAllText($micLauncher, $micBat, (New-Object Text.ASCIIEncoding))
     try {
         $desktop = [Environment]::GetFolderPath('Desktop')
         $shell = New-Object -ComObject WScript.Shell
@@ -254,7 +264,13 @@ function Install-Suzy {
         $shortcut.IconLocation = "$venvPython,0"
         $shortcut.Description = 'Start Suzy, your AI assistant'
         $shortcut.Save()
-        Write-Ok "Desktop shortcut 'Suzy' created."
+        $micShortcut = $shell.CreateShortcut((Join-Path $desktop 'Suzy Mic Test.lnk'))
+        $micShortcut.TargetPath = $micLauncher
+        $micShortcut.WorkingDirectory = $InstallDir
+        $micShortcut.IconLocation = "$env:SystemRoot\System32\SndVol.exe,0"
+        $micShortcut.Description = 'Check that Suzy can hear your microphone'
+        $micShortcut.Save()
+        Write-Ok "Desktop shortcuts 'Suzy' and 'Suzy Mic Test' created."
     } catch {
         Write-Note "Couldn't create the desktop shortcut; you can double-click '$launcher' instead."
     }

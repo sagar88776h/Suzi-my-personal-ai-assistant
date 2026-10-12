@@ -54,6 +54,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "voice": {
         "enabled": True,             # microphone + push-to-talk
         "hotkey": "ctrl+alt+s",      # works from any window
+        "input_device": None,        # None = Windows default mic; or part of a mic's name
+        "energy_threshold": 0.006,   # how loud counts as speech; lower = more sensitive
         "max_record_seconds": 15,
         "silence_seconds": 1.2,      # pause that ends what you're saying
         "no_speech_timeout": 6,      # stop listening if you say nothing

@@ -23,7 +23,13 @@ from collections.abc import Callable
 from typing import Any
 
 from core.assistant import Assistant, AssistantReply
-from core.audio import AudioDeviceError, Player, Recorder, play_cue
+from core.audio import (
+    AudioDeviceError,
+    Player,
+    Recorder,
+    describe_quiet_recording,
+    play_cue,
+)
 from core.stt import SpeechToText, STTError
 from core.tts import TextToSpeech
 
@@ -138,7 +144,13 @@ class VoiceSession:
             return self._fail(str(exc))
 
         if audio is None:
-            self._emit("info", "I didn't hear anything.")
+            peak = getattr(self.recorder, "last_peak", None)
+            threshold = getattr(self.recorder, "last_threshold", None)
+            if peak is None or threshold is None:
+                self._emit("info", "I didn't hear anything.")
+            else:
+                log.info("Nothing heard: peak level %.4f, threshold %.4f", peak, threshold)
+                self._emit("info", describe_quiet_recording(peak, threshold))
             return None
 
         self._emit("transcribing")

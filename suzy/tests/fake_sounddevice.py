@@ -99,10 +99,22 @@ class FakeSoundDevice(types.ModuleType):
         self.OutputStream = OutputStream
 
     def query_devices(self, kind=None):
+        if kind is None:  # full device list, like sounddevice.query_devices()
+            devices = []
+            if self.input_device is not None:
+                devices.append({"name": self.input_device, "max_input_channels": 1, "max_output_channels": 0})
+            devices.append({"name": "USB Headset Microphone", "max_input_channels": 1, "max_output_channels": 0})
+            devices.append({"name": self.output_device or "Speakers", "max_input_channels": 0,
+                            "max_output_channels": 2})
+            return devices
         name = self.input_device if kind == "input" else self.output_device
         if name is None:
             raise RuntimeError(f"no default {kind} device")
         return {"name": name}
+
+    @property
+    def default(self):
+        return types.SimpleNamespace(device=(0 if self.input_device is not None else -1, 2))
 
 
 def install_fake_sounddevice(monkeypatch, **kwargs) -> FakeSoundDevice:
