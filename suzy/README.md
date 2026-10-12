@@ -147,6 +147,16 @@ Nothing is sent anywhere until she hears "Suzy".
 > text works out of the box for "Suzy", "Hi Suzy" and "Hello Suzy" alike, even with the
 > request in the same sentence.
 
+**Her voice:** a natural Indian female voice (`en-IN-NeerjaExpressiveNeural` by default).
+To hear all the options and pick your favourite, double-click **Suzy Voices** on your
+desktop (or run `python main.py --voices`). You can also just tell her: *"Suzy, change
+your voice to Swara"*, *"speak a little faster"*, or *"lower your pitch a bit"*.
+
+**Speed:** your speech is turned into text by Groq's cloud Whisper (about half a second,
+free with the same key, very good at Hindi and Hinglish). Your PC's own model takes over
+automatically when you're offline. Simple actions are answered straight away, e.g.
+"Opening Notepad.", without a second AI round-trip.
+
 **Push-to-talk also works:** press **Enter** on an empty line, or **Ctrl+Alt+S** from
 any window, then speak and pause.
 
@@ -289,6 +299,8 @@ Assistant ──► LLM router ──► Groq (retry once) ──► Gemini fall
 | Suzy stops listening too early / too late | Raise or lower `voice.silence_seconds` in `config.yaml` (default 1.2). |
 | Suzy misunderstands words | Set `stt.beam_size: 5` (a bit slower), or `stt.model: medium` (much slower but more accurate). For English only, set `stt.language: en`. |
 | Change her voice or speed | `tts.voice`, `tts.rate` (`"+15%"` = faster) and `tts.pitch` in `config.yaml`. |
+| Voice sounds robotic and Suzy says she's "using the Windows voice" | The natural voice service couldn't be reached (internet or firewall). It comes back by itself. |
+| Want a different voice | Double-click **Suzy Voices**, or say "Suzy, change your voice to Swara / Ava / Neerja". |
 | Robotic voice | No internet, so Suzy switched to the Windows built-in voice. The natural voice comes back automatically when you're online again. |
 | *"I couldn't download my speech model"* | Suzy needs internet once to download it. Check your connection and restart her. |
 | Speech model fails to load (DLL error) | Install the *Microsoft Visual C++ Redistributable (x64)* from Microsoft's website, then restart Suzy. |

@@ -34,6 +34,23 @@ DEFAULT_PROMPT = "Hey Suzy, open Chrome. Volume thoda kam karo. Aaj ka weather k
 class STTError(RuntimeError):
     """Speech recognition is unavailable; the message is safe to show the user."""
 
+    def __init__(self, message: str, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+
+
+def retry_language(detected: str | None, forced: str | None, allowed: tuple[str, ...]) -> str | None:
+    """Which language to re-run recognition in, or None to keep the result.
+
+    Whisper often labels spoken Hindi as Urdu (and writes Urdu script), and on short
+    clips may pick an unrelated language: Urdu -> Hindi, anything else -> English.
+    """
+    if forced or not allowed or detected in allowed:
+        return None
+    if detected == "ur" and "hi" in allowed:
+        return "hi"
+    return "en" if "en" in allowed else allowed[0]
+
 
 @dataclass
 class Transcript:
@@ -53,6 +70,8 @@ class STTSettings:
     beam_size: int = 1
     initial_prompt: str | None = DEFAULT_PROMPT
     models_dir: str = "models"
+    engine: str = "groq"                          # "groq" (cloud, fast) or "local"
+    cloud_model: str = "whisper-large-v3-turbo"
 
     @classmethod
     def from_config(cls, config: Any) -> STTSettings:
@@ -68,6 +87,8 @@ class STTSettings:
             beam_size=max(1, int(config.get("stt.beam_size", defaults.beam_size))),
             initial_prompt=config.get("stt.initial_prompt", defaults.initial_prompt),
             models_dir=str(config.get("stt.models_dir", defaults.models_dir)),
+            engine=str(config.get("stt.engine", defaults.engine)).strip().lower(),
+            cloud_model=str(config.get("stt.cloud_model", defaults.cloud_model)),
         )
 
 
@@ -168,12 +189,12 @@ class SpeechToText:
             with self._transcribe_lock:
                 text, info = self._run(audio, self.settings.language)
                 language = getattr(info, "language", None)
-                # Auto-detect sometimes picks an unrelated language on short clips; retry in English.
-                allowed = self.settings.allowed_languages
-                if self.settings.language is None and allowed and language not in allowed:
-                    log.debug("Detected %s, not in %s; retrying as English", language, allowed)
-                    text, info = self._run(audio, "en")
-                    language = "en"
+                # Auto-detect sometimes picks an unrelated language on short clips; retry.
+                retry = retry_language(language, self.settings.language, self.settings.allowed_languages)
+                if retry:
+                    log.debug("Detected %s; retrying as %s", language, retry)
+                    text, info = self._run(audio, retry)
+                    language = retry
         except Exception as exc:  # noqa: BLE001 - CTranslate2 / decoding errors
             log.exception("Transcription failed")
             raise STTError("Sorry, my speech recognition hit a problem. Could you try again?") from exc
@@ -187,3 +208,167 @@ class SpeechToText:
             language_probability=float(getattr(info, "language_probability", 0.0) or 0.0),
             seconds=time.perf_counter() - started,
         )
+
+
+# =========================================================================== cloud (Groq)
+LANGUAGE_CODES = {
+    "english": "en", "hindi": "hi", "urdu": "ur", "marathi": "mr", "bengali": "bn", "punjabi": "pa",
+    "gujarati": "gu", "tamil": "ta", "telugu": "te", "kannada": "kn", "malayalam": "ml", "nepali": "ne",
+}
+
+
+def language_code(value: Any) -> str | None:
+    """Whisper APIs report "english" or "en"; normalise to the two-letter code."""
+    if not value:
+        return None
+    text = str(value).strip().lower()
+    return text if len(text) == 2 else LANGUAGE_CODES.get(text, text[:2])
+
+
+def to_wav_bytes(audio: np.ndarray, sample_rate: int = 16_000) -> bytes:
+    """16-bit mono WAV in memory (what speech APIs accept)."""
+    import io
+    import wave
+
+    pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm)
+    return buffer.getvalue()
+
+
+class GroqSpeechToText:
+    """Whisper large-v3-turbo on Groq: ~0.3-0.5 s per request, very accurate (Hindi too).
+
+    Free with the same GROQ_API_KEY (about 2,000 requests a day). Used for requests
+    only - the always-on "Suzy" check stays on the PC.
+    """
+
+    def __init__(self, api_key: str | None, model: str = "whisper-large-v3-turbo",
+                 language: str | None = None, allowed_languages: tuple[str, ...] = ("en", "hi"),
+                 prompt: str | None = DEFAULT_PROMPT, timeout: float = 10.0) -> None:
+        self.api_key = api_key
+        self.model = model
+        self.language = language
+        self.allowed_languages = allowed_languages
+        self.prompt = prompt
+        self.timeout = timeout
+        self.disabled_reason: str | None = None
+        self._client: Any = None
+
+    @property
+    def available(self) -> bool:
+        return bool(self.api_key) and self.disabled_reason is None
+
+    def _request(self, wav: bytes, language: str | None) -> tuple[str, str | None]:
+        if self._client is None:
+            from groq import Groq
+
+            self._client = Groq(api_key=self.api_key, timeout=self.timeout, max_retries=0)
+        kwargs: dict[str, Any] = {"model": self.model, "file": ("speech.wav", wav),
+                                  "response_format": "verbose_json", "temperature": 0.0}
+        if self.prompt:
+            kwargs["prompt"] = self.prompt
+        if language:
+            kwargs["language"] = language
+        response = self._client.audio.transcriptions.create(**kwargs)
+        extra = getattr(response, "model_extra", None) or {}
+        detected = getattr(response, "language", None) or extra.get("language")
+        return (getattr(response, "text", "") or "").strip(), language_code(detected)
+
+    def transcribe(self, audio: np.ndarray) -> Transcript:
+        if not self.available:
+            raise STTError(self.disabled_reason or "No Groq key for cloud speech recognition.", retryable=False)
+        started = time.perf_counter()
+        wav = to_wav_bytes(audio)
+        try:
+            text, language = self._request(wav, self.language)
+            retry = retry_language(language, self.language, self.allowed_languages)
+            if retry:
+                log.debug("Cloud STT detected %s; retrying as %s", language, retry)
+                text, _ = self._request(wav, retry)
+                language = retry
+        except Exception as exc:  # noqa: BLE001 - classified below
+            raise self._error(exc) from exc
+        if text.lower() in HALLUCINATIONS:
+            text = ""
+        return Transcript(text, language, 1.0, time.perf_counter() - started)
+
+    def _error(self, exc: Exception) -> STTError:
+        try:
+            import groq
+        except ImportError:
+            return STTError(f"cloud speech recognition failed: {exc}")
+        if isinstance(exc, (groq.AuthenticationError, groq.PermissionDeniedError)):
+            self.disabled_reason = "The Groq key was rejected for speech recognition."
+            return STTError(self.disabled_reason, retryable=False)
+        if isinstance(exc, groq.NotFoundError):
+            self.disabled_reason = f"Groq no longer offers the {self.model} speech model."
+            return STTError(self.disabled_reason, retryable=False)
+        return STTError(f"cloud speech recognition failed: {str(exc)[:200]}")
+
+
+class HybridSpeechToText:
+    """Cloud speech recognition first (fast); the local Whisper model as backup.
+
+    Has the same interface as :class:`SpeechToText`, so the rest of Suzy doesn't care.
+    After a cloud failure (offline, rate limit) the local model is used for a minute.
+    """
+
+    COOLDOWN_SECONDS = 60
+
+    def __init__(self, cloud: GroqSpeechToText, local: SpeechToText) -> None:
+        self.cloud = cloud
+        self.local = local
+        self._cloud_down_until = 0.0
+
+    # Pass-through for setup code that manages the local model.
+    @property
+    def settings(self) -> STTSettings:
+        return self.local.settings
+
+    @property
+    def is_downloaded(self) -> bool:
+        return self.local.is_downloaded
+
+    def load_async(self) -> threading.Thread:
+        return self.local.load_async()
+
+    def load(self) -> None:
+        self.local.load()
+
+    @property
+    def is_ready(self) -> bool:
+        return self.cloud.available or self.local.is_ready
+
+    @property
+    def load_error(self) -> str | None:
+        return None if self.cloud.available else self.local.load_error
+
+    def wait_until_loaded(self, timeout: float | None = None) -> bool:
+        return True if self.cloud.available else self.local.wait_until_loaded(timeout)
+
+    def transcribe(self, audio: np.ndarray) -> Transcript:
+        if self.cloud.available and time.monotonic() >= self._cloud_down_until:
+            try:
+                return self.cloud.transcribe(audio)
+            except STTError as exc:
+                log.warning("Cloud speech recognition failed (%s); using the local model", exc)
+                if exc.retryable:
+                    self._cloud_down_until = time.monotonic() + self.COOLDOWN_SECONDS
+        if not self.local.is_ready and not self.local.wait_until_loaded(0) and self.local.load_error:
+            raise STTError(self.local.load_error)
+        return self.local.transcribe(audio)
+
+
+def create_speech_to_text(settings: STTSettings, api_key: str | None) -> SpeechToText | HybridSpeechToText:
+    """The recogniser for requests: Groq cloud first (if enabled and a key exists), local as backup."""
+    local = SpeechToText(settings)
+    if settings.engine == "groq" and api_key:
+        cloud = GroqSpeechToText(api_key, settings.cloud_model, settings.language,
+                                 settings.allowed_languages, settings.initial_prompt)
+        return HybridSpeechToText(cloud, local)
+    return local

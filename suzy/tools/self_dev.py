@@ -117,7 +117,7 @@ def undo_my_last_update() -> ToolResult:
     return ToolResult.ok(MANAGER.undo_last())
 
 
-@tool(description="List the recent changes you made to your own code.", category="self")
+@tool(description="List the recent changes you made to your own code.", category="self", speak_result=False)
 def list_my_updates() -> ToolResult:
     if MANAGER is None:
         return _unavailable()

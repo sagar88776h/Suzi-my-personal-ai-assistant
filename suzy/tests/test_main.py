@@ -160,7 +160,7 @@ def test_build_voice_with_fake_devices(monkeypatch, tmp_path):
     ui = main.TerminalUI()
     voice = main.build_voice(config, assistant, ui)
     assert voice.session.can_listen and voice.hotkey is not None and ui.hotkey_label == "Ctrl+Alt+S"
-    assert any("downloading my speech model" in n for n in voice.notes)
+    assert any("downloading my backup speech model" in n for n in voice.notes)
     assert any("Fake Mic" in n for n in voice.notes) and voice.problems == []
 
 
@@ -305,3 +305,21 @@ def test_build_voice_starts_wake_word(monkeypatch, tmp_path, _no_background_work
 
     off = Config({"stt": {"models_dir": str(tmp_path)}, "voice": {"wake_word": {"enabled": False}}})
     assert main.build_voice(off, assistant, main.TerminalUI()).listener is None
+
+
+def test_build_voice_uses_cloud_speech_recognition_with_a_groq_key(monkeypatch, tmp_path):
+    from core.stt import HybridSpeechToText, SpeechToText
+    from tests.fake_sounddevice import install_fake_sounddevice
+
+    install_fake_sounddevice(monkeypatch)
+    monkeypatch.setattr("core.stt.SpeechToText.load_async", lambda self: None)
+    monkeypatch.setitem(__import__("sys").modules, "pynput", None)
+    assistant, _router, _registry = main.build_assistant(Config())
+
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    voice = main.build_voice(Config({"stt": {"models_dir": str(tmp_path)}}), assistant, main.TerminalUI())
+    assert isinstance(voice.session.stt, HybridSpeechToText)
+    assert any("Groq cloud Whisper" in n for n in voice.notes)
+
+    local_only = Config({"stt": {"models_dir": str(tmp_path), "engine": "local"}})
+    assert type(main.build_voice(local_only, assistant, main.TerminalUI()).session.stt) is SpeechToText

@@ -217,3 +217,61 @@ def test_loud_room_does_not_make_suzy_deaf(monkeypatch):
     install_fake_sounddevice(monkeypatch, mic_signal=noisy)
     recorder = Recorder(fast_settings(max_seconds=3))
     assert recorder.record() is not None and recorder.last_threshold <= 0.03
+
+
+# ----------------------------------------------------------------- continuous playback
+def _queue(*items):
+    import queue as queue_module
+
+    q = queue_module.Queue()
+    for item in items:
+        q.put(item)
+    return q
+
+
+def test_play_queue_is_one_continuous_stream(monkeypatch):
+    fake = install_fake_sounddevice(monkeypatch)
+    a, b = np.full(2400, 0.5, np.float32), np.full(2400, -0.5, np.float32)
+    assert Player().play_queue(_queue((a, 24_000), (b, 24_000), None), 24_000) is True
+    assert len(fake.played) == 1                       # ONE stream for both chunks
+    played = fake.played[0]
+    assert np.count_nonzero(played) >= 4700           # no silent gap between the chunks
+    assert played[0] == 0.0 and abs(played[1199]) == pytest.approx(0.5)  # faded in, then full level
+
+
+def test_play_queue_resamples_offline_voice(monkeypatch):
+    fake = install_fake_sounddevice(monkeypatch)
+    assert Player().play_queue(_queue((np.full(22_050, 0.3, np.float32), 22_050), None), 24_000)
+    assert abs(np.count_nonzero(fake.played[0]) - 24_000) < 300
+
+
+def test_play_queue_waits_for_slow_synthesis(monkeypatch):
+    import queue as queue_module
+
+    fake = install_fake_sounddevice(monkeypatch, realtime=0.005)
+    q = queue_module.Queue()
+    q.put((np.full(2400, 0.4, np.float32), 24_000))
+    threading.Timer(0.2, lambda: (q.put((np.full(2400, 0.4, np.float32), 24_000)), q.put(None))).start()
+    assert Player().play_queue(q, 24_000) is True
+    assert np.count_nonzero(fake.played[0]) >= 4700   # both chunks played, silence in between
+
+
+def test_play_queue_stop_and_stall(monkeypatch):
+    import queue as queue_module
+
+    install_fake_sounddevice(monkeypatch, realtime=0.005)
+    player = Player()
+    threading.Timer(0.15, player.stop).start()
+    started = time.monotonic()
+    assert player.play_queue(queue_module.Queue(), 24_000) is False   # nothing ever arrives; stopped
+    assert time.monotonic() - started < 1.5
+    player.reset()
+    assert player.play_queue(queue_module.Queue(), 24_000, stall_seconds=0.2) is True  # gives up on a stall
+
+
+def test_resample_and_smooth_edges():
+    assert len(audio.resample(np.ones(22_050, np.float32), 22_050, 24_000)) == 24_000
+    same = np.ones(10, np.float32)
+    assert audio.resample(same, 24_000, 24_000) is same
+    faded = audio.smooth_edges(np.ones(2400, np.float32), 24_000)
+    assert faded[0] == 0.0 and faded[-1] == 0.0 and faded[1200] == 1.0

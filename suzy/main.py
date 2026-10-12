@@ -11,6 +11,7 @@ Usage:
     python main.py --quiet                hide the tool-call trace
     python main.py --check                only test the API keys / models and exit
     python main.py --mic-test             check the microphone (lists mics, shows your voice level)
+    python main.py --voices               listen to Suzy's voice options and pick one
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from typing import Any
 from core.assistant import Assistant, AssistantReply
 from core.audio import (
     AudioDeviceError,
+    Player,
     Recorder,
     RecordingSettings,
     check_devices,
@@ -48,10 +50,16 @@ from core.llm import LLMRouter, ProviderStatus
 from core.logging_setup import setup_logging
 from core.paths import APP_DIR
 from core.selfcode import RESTART_EXIT_CODE, ErrorWatcher, SelfDevManager, fix_request
-from core.stt import SpeechToText, STTError, STTSettings
-from core.tts import TextToSpeech, TTSSettings
+from core.stt import (
+    HybridSpeechToText,
+    SpeechToText,
+    STTError,
+    STTSettings,
+    create_speech_to_text,
+)
+from core.tts import EdgeSynthesizer, TextToSpeech, TTSSettings
 from core.voice import VoiceSession
-from tools import apps, self_dev
+from tools import apps, self_dev, voice_settings
 from tools.registry import ToolRegistry, load_all_tools
 
 log = logging.getLogger("suzy.main")
@@ -116,6 +124,8 @@ def build_voice(config: Config, assistant: Assistant, ui: TerminalUI,
     if mute:
         tts_settings.enabled = False
     tts = TextToSpeech(tts_settings)
+    tts.on_notice = lambda text: ui.on_event("info", text)
+    voice_settings.configure(tts, config)
 
     listen = bool(config.get("voice.enabled", True)) and not no_voice
     devices = check_devices() if (listen or tts_settings.enabled) else None
@@ -132,16 +142,18 @@ def build_voice(config: Config, assistant: Assistant, ui: TerminalUI,
         except AudioDeviceError as exc:
             problems.append(f"{exc} Using the Windows default microphone instead.")
     if listen:
-        stt = SpeechToText(STTSettings.from_config(config))
+        stt = create_speech_to_text(STTSettings.from_config(config), Config.api_key("groq"))
         recorder = Recorder(RecordingSettings(
             max_seconds=float(config.get("voice.max_record_seconds", 15)),
             silence_seconds=float(config.get("voice.silence_seconds", 1.2)),
             no_speech_timeout=float(config.get("voice.no_speech_timeout", 6)),
             energy_threshold=float(config.get("voice.energy_threshold", 0.006)),
         ), device=mic_device)
+        if isinstance(stt, HybridSpeechToText):
+            notes.append("Speech recognition: Groq cloud Whisper (fast), with the local model as backup.")
         if not stt.is_downloaded:
-            notes.append(f"First run: downloading my speech model ('{stt.settings.model}', about 480 MB) "
-                         "in the background. You can type meanwhile.")
+            notes.append(f"First run: downloading my backup speech model ('{stt.settings.model}', about "
+                         "480 MB) in the background.")
         stt.load_async()
 
     session = VoiceSession(assistant, tts, stt, recorder, on_event=ui.on_event,
@@ -468,6 +480,68 @@ def _transcription_check(config: Config, audio: Any) -> int:
     return 0
 
 
+# =========================================================================== voice preview
+VOICE_SAMPLE = ("Hi {name}! Main Suzy hoon. I can open your apps, play music, and keep you on time. "
+                "Bataiye, aaj main aapki kya madad karoon?")
+PREFERRED_LOCALES = ("en-IN", "hi-IN")
+
+
+def fetch_voice_choices() -> list[dict[str, str]]:
+    """Female Indian voices first, then the most natural multilingual ones."""
+    import asyncio
+
+    import edge_tts
+
+    voices = asyncio.run(edge_tts.list_voices())
+    female = [v for v in voices if v.get("Gender") == "Female"]
+    indian = [v for v in female if v.get("Locale") in PREFERRED_LOCALES]
+    multilingual = [v for v in female if "Multilingual" in v.get("ShortName", "") and v not in indian]
+    return [{"name": v["ShortName"], "locale": v.get("Locale", "")} for v in indian + multilingual[:6]]
+
+
+def run_voice_preview(config: Config) -> int:
+    """Play a sample of each voice, then save the one Sagar picks."""
+    print("Suzy voice preview - getting the list of voices...\n")
+    try:
+        choices = fetch_voice_choices()
+    except Exception as exc:  # noqa: BLE001 - offline, service change, ...
+        print(f"  I couldn't get the voice list ({exc}). Check your internet connection and try again.")
+        return 1
+    if not choices:
+        print("  No voices found.")
+        return 1
+    sample = VOICE_SAMPLE.format(name=config.get("user.name", "Sagar"))
+    current = config.get("tts.voice")
+    player = Player()
+    print("  Listen to each one (press Ctrl+C to skip to the next):\n")
+    for number, choice in enumerate(choices, 1):
+        marker = "   <- current" if choice["name"] == current else ""
+        print(f"  [{number}] {choice['name']}  ({choice['locale']}){marker}")
+        try:
+            samples, rate = EdgeSynthesizer(choice["name"]).synthesize(sample)
+            player.reset()
+            player.play(samples, rate)
+        except KeyboardInterrupt:
+            player.stop()
+        except Exception as exc:  # noqa: BLE001 - one broken voice shouldn't stop the preview
+            print(f"      (couldn't play this one: {exc})")
+    print()
+    try:
+        answer = input("  Type the number of the voice you liked best (Enter = keep the current one): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    if not answer:
+        print("  Keeping the current voice.")
+        return 0
+    if not answer.isdigit() or not 1 <= int(answer) <= len(choices):
+        print("  That's not one of the numbers - nothing changed.")
+        return 1
+    chosen = choices[int(answer) - 1]["name"]
+    config.persist("tts.voice", chosen)
+    print(f"  Saved! Suzy will use {chosen} from her next start.")
+    return 0
+
+
 # =========================================================================== self-improvement
 def restart_for_update(session: VoiceSession) -> None:
     """Exit so guard.py restarts Suzy with her freshly installed code."""
@@ -523,6 +597,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mute", action="store_true", help="don't speak replies out loud")
     parser.add_argument("--no-voice", action="store_true", help="disable the microphone and hotkey")
     parser.add_argument("--mic-test", action="store_true", help="test the microphone and exit")
+    parser.add_argument("--voices", action="store_true", help="listen to the voice options and pick one")
     args = parser.parse_args(argv)
 
     _configure_console()
@@ -537,6 +612,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.mic_test:
         return run_mic_test(config)
+    if args.voices:
+        return run_voice_preview(config)
 
     try:
         assistant, router, registry = build_assistant(config)

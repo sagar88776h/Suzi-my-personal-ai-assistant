@@ -85,6 +85,25 @@ def split_sentences(text: str, min_chars: int = 30, max_chars: int = 250) -> lis
     return merged
 
 
+def speech_chunks(text: str, whole_up_to: int = 320, group_up_to: int = 400) -> list[str]:
+    """How a reply is sent to the voice service.
+
+    Short replies (most of Suzy's) go in ONE request, so the intonation flows naturally
+    across sentences. Longer ones: the first sentence alone (so she starts talking
+    quickly), then the rest in large groups.
+    """
+    if len(text) <= whole_up_to:
+        return [text] if text else []
+    sentences = split_sentences(text, max_chars=250)
+    chunks = [sentences[0]]
+    for sentence in sentences[1:]:
+        if len(chunks) > 1 and len(chunks[-1]) + len(sentence) < group_up_to:
+            chunks[-1] = f"{chunks[-1]} {sentence}"
+        else:
+            chunks.append(sentence)
+    return chunks
+
+
 def normalize_rate(value: Any) -> str:
     """Accept 10, "10", "+10%" or "-5%" and return edge-tts format ("+10%")."""
     text = str(value).strip().rstrip("%") or "0"
@@ -296,10 +315,27 @@ class TextToSpeech:
         self._lock = threading.Lock()
         self._primary_down_until = 0.0
         self.last_error: str | None = None
+        # Called once when the natural voice can't be reached (e.g. to tell Sagar why she sounds robotic).
+        self.on_notice: Any = None
+        self._noticed = False
 
     @property
     def is_speaking(self) -> bool:
         return self._speaking.is_set()
+
+    def update_voice(self, voice: str | None = None, rate: str | None = None, pitch: str | None = None) -> None:
+        """Change the voice, speed or pitch for the next things Suzy says."""
+        if voice:
+            self.settings.voice = voice
+        if rate is not None:
+            self.settings.rate = normalize_rate(rate)
+        if pitch is not None:
+            self.settings.pitch = normalize_pitch(pitch)
+        if isinstance(self.primary, EdgeSynthesizer):
+            self.primary.voice = self.settings.voice
+            self.primary.rate = self.settings.rate
+            self.primary.pitch = self.settings.pitch
+        self._primary_down_until = 0.0  # try the natural voice again right away
 
     def stop(self) -> None:
         """Interrupt the current speech immediately."""
@@ -316,6 +352,10 @@ class TextToSpeech:
                 log.warning("%s voice failed: %s", self.primary.name, exc)
                 if exc.network:
                     self._primary_down_until = time.monotonic() + EDGE_RETRY_AFTER_SECONDS
+                    if not self._noticed and self.on_notice is not None:
+                        self._noticed = True
+                        self.on_notice("My natural voice service isn't reachable right now, so I'm using the "
+                                       "Windows voice. The natural voice comes back by itself when it can.")
         if self.offline is not None:
             try:
                 return self.offline.synthesize(text)
@@ -328,7 +368,7 @@ class TextToSpeech:
         """Say ``text``. Returns True if it was spoken completely. Never raises."""
         if not self.settings.enabled:
             return False
-        chunks = split_sentences(clean_for_speech(text or ""))
+        chunks = speech_chunks(clean_for_speech(text or ""))
         if not chunks:
             return True
 
@@ -368,23 +408,8 @@ class TextToSpeech:
             worker.start()
             completed = True
             try:
-                while True:
-                    try:
-                        item = ready.get(timeout=0.1)
-                    except queue.Empty:
-                        if self._stop.is_set():
-                            completed = False
-                            break
-                        if not worker.is_alive() and ready.empty():
-                            completed = False
-                            break
-                        continue
-                    if item is None:
-                        break
-                    samples, sample_rate = item
-                    if not self.player.play(samples, sample_rate, level_callback):
-                        completed = False
-                        break
+                # One continuous stream for the whole reply: no gaps or clicks between chunks.
+                completed = self.player.play_queue(ready, EDGE_SAMPLE_RATE, level_callback)
             except AudioDeviceError as exc:
                 self.last_error = str(exc)
                 log.warning("Playback failed: %s", exc)

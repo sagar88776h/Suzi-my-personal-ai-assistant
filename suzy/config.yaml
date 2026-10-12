@@ -11,6 +11,7 @@ assistant:
   name: Suzy
   max_context_turns: 20   # how many past conversation turns the brain remembers
   max_tool_rounds: 5      # max chained PC actions for a single request
+  quick_replies: true     # say simple results ("Opening Notepad.") directly - about 1 s faster
 
 llm:
   provider: groq          # primary brain: groq | gemini
@@ -50,15 +51,17 @@ voice:
 
 tts:                      # Suzy's voice
   enabled: true
-  voice: en-IN-NeerjaNeural      # also try en-US-AriaNeural, en-US-JennyNeural, en-GB-SoniaNeural
-  fallback_voice: en-US-AriaNeural
+  voice: en-IN-NeerjaExpressiveNeural  # hear all voices: double-click "Suzy Voices" (or: main.py --voices)
+  fallback_voice: en-IN-NeerjaNeural
   rate: "+0%"             # speed: "+15%" faster, "-10%" slower
   pitch: "+0Hz"           # "+5Hz" higher, "-5Hz" lower
   volume: "+0%"
   offline_fallback: true  # use the Windows built-in voice when there's no internet
 
-stt:                      # Suzy's ears (faster-whisper, runs on your CPU)
-  model: small            # tiny | base | small | medium - bigger is more accurate but slower
+stt:                      # Suzy's ears
+  engine: groq            # groq = fast cloud Whisper (free, same key, ~0.5 s); local = only this PC (slower)
+  cloud_model: whisper-large-v3-turbo
+  model: small            # local model (also the backup when offline): tiny | base | small | medium
   device: cpu
   compute_type: int8
   language: null          # null = auto (English / Hindi); "en" to force English

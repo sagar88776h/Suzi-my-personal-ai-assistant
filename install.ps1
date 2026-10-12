@@ -188,6 +188,16 @@ function Install-Suzy {
         Write-Ok "Updated config.yaml to the current AI models (old one saved as config.backup.yaml)."
     } else {
         Write-Ok "Kept your existing config.yaml."
+        # Move settings that still hold an OLD default to the new default (values you chose are kept).
+        $configText = [IO.File]::ReadAllText($configPath)
+        $migrated = $configText
+        $migrated = [regex]::Replace($migrated, '(?m)^(\s+voice:[ \t]*)en-IN-NeerjaNeural([ \t]+# also try[^\r\n]*)(?=\r?$)',
+            '${1}en-IN-NeerjaExpressiveNeural  # hear all voices: double-click "Suzy Voices"')
+        $migrated = [regex]::Replace($migrated, '(?m)^(\s+fallback_voice:[ \t]*)en-US-AriaNeural[ \t]*(?=\r?$)', '${1}en-IN-NeerjaNeural')
+        if ($migrated -ne $configText) {
+            [IO.File]::WriteAllText($configPath, $migrated, (New-Object Text.UTF8Encoding $false))
+            Write-Ok "Switched Suzy to the new, more natural Indian voice."
+        }
     }
     New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir 'logs'), (Join-Path $InstallDir 'data') | Out-Null
     Remove-Item $zip, $extract -Recurse -Force -ErrorAction SilentlyContinue
@@ -263,6 +273,16 @@ function Install-Suzy {
         'pause'
     ) -join "`r`n"
     [IO.File]::WriteAllText($micLauncher, $micBat, (New-Object Text.ASCIIEncoding))
+    $voicesLauncher = Join-Path $InstallDir 'Suzy Voices.bat'
+    $voicesBat = @(
+        '@echo off',
+        'title Suzy voices',
+        'cd /d "%~dp0"',
+        '".venv\Scripts\python.exe" main.py --voices',
+        'echo.',
+        'pause'
+    ) -join "`r`n"
+    [IO.File]::WriteAllText($voicesLauncher, $voicesBat, (New-Object Text.ASCIIEncoding))
     try {
         $desktop = [Environment]::GetFolderPath('Desktop')
         $shell = New-Object -ComObject WScript.Shell
@@ -278,7 +298,13 @@ function Install-Suzy {
         $micShortcut.IconLocation = "$env:SystemRoot\System32\SndVol.exe,0"
         $micShortcut.Description = 'Check that Suzy can hear your microphone'
         $micShortcut.Save()
-        Write-Ok "Desktop shortcuts 'Suzy' and 'Suzy Mic Test' created."
+        $voicesShortcut = $shell.CreateShortcut((Join-Path $desktop 'Suzy Voices.lnk'))
+        $voicesShortcut.TargetPath = $voicesLauncher
+        $voicesShortcut.WorkingDirectory = $InstallDir
+        $voicesShortcut.IconLocation = "$env:SystemRoot\System32\SndVol.exe,0"
+        $voicesShortcut.Description = "Listen to Suzy's voices and pick your favourite"
+        $voicesShortcut.Save()
+        Write-Ok "Desktop shortcuts 'Suzy', 'Suzy Mic Test' and 'Suzy Voices' created."
     } catch {
         Write-Note "Couldn't create the desktop shortcut; you can double-click '$launcher' instead."
     }

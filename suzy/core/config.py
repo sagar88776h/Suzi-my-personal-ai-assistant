@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import logging
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "name": "Suzy",
         "max_context_turns": 20,   # conversation turns sent to the LLM
         "max_tool_rounds": 5,      # tool-call rounds allowed per request
+        "quick_replies": True,     # say simple action results directly (skips a 2nd AI call)
     },
     "llm": {
         "provider": "groq",
@@ -71,15 +73,17 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "tts": {
         "enabled": True,
-        "voice": "en-IN-NeerjaNeural",
-        "fallback_voice": "en-US-AriaNeural",
+        "voice": "en-IN-NeerjaExpressiveNeural",  # natural, expressive Indian female voice
+        "fallback_voice": "en-IN-NeerjaNeural",
         "rate": "+0%",               # speed, e.g. "+15%" faster, "-10%" slower
         "pitch": "+0Hz",
         "volume": "+0%",
         "offline_fallback": True,    # Windows built-in voice when there's no internet
     },
     "stt": {
-        "model": "small",            # tiny | base | small | medium (bigger = slower, more accurate)
+        "engine": "groq",            # groq = fast cloud Whisper (free, same key); local = on this PC only
+        "cloud_model": "whisper-large-v3-turbo",
+        "model": "small",            # local model, also the backup when offline            # tiny | base | small | medium (bigger = slower, more accurate)
         "device": "cpu",
         "compute_type": "int8",
         "language": None,            # None = auto (English/Hindi); "en" to force English
@@ -125,6 +129,45 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
         else:
             merged[key] = copy.deepcopy(value)
     return merged
+
+
+_YAML_LINE = re.compile(r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_]+):(?P<rest>.*)$")
+
+
+def replace_yaml_value(text: str, keys: list[str], value: Any) -> str | None:
+    """Replace the value of ``a.b.c`` in YAML text, keeping indentation and the line's comment.
+
+    Returns None if the key isn't in the text (or holds a nested block).
+    """
+    stack: list[tuple[int, str]] = []
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = _YAML_LINE.match(line.rstrip("\r\n"))
+        if not match:
+            continue
+        indent = len(match["indent"])
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        stack.append((indent, match["key"]))
+        if [key for _indent, key in stack] != keys:
+            continue
+        rest = match["rest"]
+        comment_at = re.search(r"\s+#", rest)
+        old_value = rest[:comment_at.start()] if comment_at else rest
+        if not old_value.strip():
+            return None  # a nested section, not a single value
+        comment = rest[comment_at.start():] if comment_at else ""
+        dumped = yaml.safe_dump(value, default_flow_style=True, allow_unicode=True).strip()
+        dumped = dumped.removesuffix("\n...").removesuffix("...").strip()
+        new_value = f" {dumped}"
+        if comment:  # keep the comment roughly where it was
+            new_value = new_value.ljust(len(old_value))
+        ending = "\n" if line.endswith("\n") else ""
+        lines[index] = f"{match['indent']}{match['key']}:{new_value}{comment}{ending}"
+        return "".join(lines)
+    return None
 
 
 class Config:
@@ -194,6 +237,25 @@ class Config:
         with self._lock:
             text = yaml.safe_dump(self._data, sort_keys=False, allow_unicode=True)
         self._path.write_text(text, encoding="utf-8")
+
+    def persist(self, dotted_key: str, value: Any) -> None:
+        """Set a value and write just that line of config.yaml, keeping its comments.
+
+        Falls back to rewriting the whole file if the key isn't in it yet.
+        """
+        self.set(dotted_key, value)
+        if self._path is None:
+            return
+        with self._lock:
+            try:
+                text = self._path.read_text(encoding="utf-8")
+            except OSError:
+                text = ""
+            updated = replace_yaml_value(text, dotted_key.split("."), value)
+            if updated is None:
+                self.save()
+            else:
+                self._path.write_text(updated, encoding="utf-8")
 
     def as_dict(self) -> dict[str, Any]:
         with self._lock:

@@ -70,6 +70,9 @@ class Tool:
     func: Callable[..., ToolResult]
     safety: SafetyLevel = SafetyLevel.SAFE
     category: str = "general"
+    # True: the result message is a good spoken answer as-is ("Opening Notepad."), so the
+    # assistant can say it without a second LLM call. False for data the LLM should explain.
+    speak_result: bool = True
 
     def schema(self) -> dict[str, Any]:
         """Provider-neutral schema: name, description and JSON-schema parameters."""
@@ -231,6 +234,7 @@ def tool(
     safety: SafetyLevel = SafetyLevel.SAFE,
     category: str = "general",
     registry: ToolRegistry | None = None,
+    speak_result: bool = True,
 ) -> Callable[[Callable[..., ToolResult]], Callable[..., ToolResult]]:
     """Decorator that registers a function as an LLM-callable tool."""
 
@@ -246,6 +250,7 @@ def tool(
                 func=func,
                 safety=safety,
                 category=category,
+                speak_result=speak_result,
             )
         )
         return func

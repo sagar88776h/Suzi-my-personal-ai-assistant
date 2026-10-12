@@ -339,6 +339,100 @@ class Player:
         return not self._stop.is_set()
 
 
+    def play_queue(self, items: queue.Queue[tuple[np.ndarray, int] | None], sample_rate: int,
+                   level_callback: LevelCallback | None = None, stall_seconds: float = 30.0) -> bool:
+        """Play (samples, rate) chunks from ``items`` through ONE continuous stream.
+
+        ``None`` in the queue marks the end. Keeping a single stream open (instead of one
+        per sentence) removes the gaps and clicks between sentences. If the next chunk
+        isn't ready yet, silence is played until it arrives. Returns False if stopped.
+        """
+        if self._stop.is_set():
+            return False
+        sd = _sd()
+        state: dict[str, Any] = {"chunk": None, "pos": 0, "done": False, "last_data": time.monotonic()}
+        finished = threading.Event()
+
+        def next_chunk() -> bool:
+            try:
+                item = items.get_nowait()
+            except queue.Empty:
+                return False
+            if item is None:
+                state["done"] = True
+                return False
+            samples, rate = item
+            state["chunk"] = smooth_edges(resample(np.asarray(samples, dtype=np.float32), rate, sample_rate),
+                                          sample_rate)
+            state["pos"] = 0
+            state["last_data"] = time.monotonic()
+            return True
+
+        def on_output(outdata: np.ndarray, frames: int, _time: Any, status: Any) -> None:
+            if status:
+                log.debug("Speaker status: %s", status)
+            filled = 0
+            while filled < frames and not self._stop.is_set():
+                chunk = state["chunk"]
+                if chunk is None or state["pos"] >= len(chunk):
+                    if state["done"] or not next_chunk():
+                        break
+                    chunk = state["chunk"]
+                take = min(frames - filled, len(chunk) - state["pos"])
+                outdata[filled:filled + take, 0] = chunk[state["pos"]:state["pos"] + take]
+                state["pos"] += take
+                filled += take
+            outdata[filled:, 0] = 0.0
+            if level_callback is not None:
+                level_callback(rms_level(outdata[:filled, 0]) if filled else 0.0)
+            exhausted = state["chunk"] is None or state["pos"] >= len(state["chunk"])
+            if self._stop.is_set() or (state["done"] and exhausted):
+                raise sd.CallbackStop
+
+        try:
+            stream = sd.OutputStream(samplerate=sample_rate, channels=1, dtype="float32",
+                                     device=self.device, callback=on_output, finished_callback=finished.set)
+        except Exception as exc:  # noqa: BLE001
+            raise AudioDeviceError("I couldn't open the speakers. Are they plugged in?") from exc
+
+        self._playing.set()
+        try:
+            with stream:
+                while not finished.wait(0.05):
+                    if self._stop.is_set():
+                        break
+                    if time.monotonic() - state["last_data"] > stall_seconds:
+                        log.warning("Speech playback stalled; stopping")
+                        break
+        except Exception as exc:  # noqa: BLE001 - e.g. headphones unplugged mid-sentence
+            raise AudioDeviceError("The speakers stopped working while I was talking.") from exc
+        finally:
+            self._playing.clear()
+            if level_callback is not None:
+                level_callback(0.0)
+        return not self._stop.is_set()
+
+
+def resample(samples: np.ndarray, rate: int, target_rate: int) -> np.ndarray:
+    """Linear resampling (enough for speech; used when the offline voice runs at 22.05 kHz)."""
+    if rate == target_rate or samples.size == 0:
+        return samples
+    count = int(round(len(samples) * target_rate / rate))
+    positions = np.linspace(0, len(samples) - 1, count)
+    return np.interp(positions, np.arange(len(samples)), samples).astype(np.float32)
+
+
+def smooth_edges(samples: np.ndarray, sample_rate: int, fade_seconds: float = 0.005) -> np.ndarray:
+    """5 ms fade in/out so joining chunks never clicks."""
+    fade = min(len(samples) // 2, int(sample_rate * fade_seconds))
+    if fade > 0:
+        samples = samples.copy()
+        ramp = np.linspace(0.0, 1.0, fade, dtype=np.float32)
+        samples[:fade] *= ramp
+        samples[-fade:] *= ramp[::-1]
+    return samples
+
+
 def tone(frequency: float, seconds: float, sample_rate: int = 24_000, volume: float = 0.18) -> np.ndarray:
     """A short sine beep with soft edges (no clicks)."""
     t = np.arange(int(sample_rate * seconds)) / sample_rate

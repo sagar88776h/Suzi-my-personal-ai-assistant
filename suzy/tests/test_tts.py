@@ -203,19 +203,51 @@ class FakePlayer:
         self.played.append(len(samples))
         return True
 
+    def play_queue(self, items, rate, level_callback=None):
+        """Like Player.play_queue: consume chunks until the None end marker."""
+        while True:
+            if self._stop.is_set():
+                return False
+            try:
+                item = items.get(timeout=0.05)
+            except Exception:  # queue.Empty
+                continue
+            if item is None:
+                return True
+            if not self.play(item[0], item[1], level_callback):
+                return False
+
 
 def make_tts(primary=None, offline=None, player=None, **settings):
     return TextToSpeech(TTSSettings(**settings), player=player or FakePlayer(),
                         primary=primary or FakeSynth(), offline=offline)
 
 
-def test_speaks_every_sentence_in_order():
+def test_short_reply_is_one_smooth_request():
     primary = FakeSynth()
     speaker = make_tts(primary)
     text = "Opening Chrome now for you, Sagar. The volume is at thirty percent. Anything else I can do?"
     assert speaker.speak(text) is True
-    assert primary.texts == split_sentences(text)
-    assert len(speaker.player.played) == len(primary.texts) and not speaker.is_speaking
+    assert primary.texts == [text]  # one request = natural intonation across sentences
+    assert len(speaker.player.played) == 1 and not speaker.is_speaking
+
+
+def test_long_reply_starts_with_the_first_sentence():
+    primary = FakeSynth()
+    speaker = make_tts(primary)
+    sentences = [f"This is sentence number {n} of a fairly long story about Suzy." for n in range(12)]
+    text = " ".join(sentences)
+    assert speaker.speak(text) is True
+    assert primary.texts[0] == sentences[0]          # quick start
+    assert " ".join(primary.texts) == text           # nothing lost
+    assert all(len(chunk) <= 400 for chunk in primary.texts[1:]) and len(primary.texts) >= 3
+
+
+def test_speech_chunks():
+    from core.tts import speech_chunks
+
+    assert speech_chunks("") == []
+    assert speech_chunks("Hi Sagar.") == ["Hi Sagar."]
 
 
 def test_offline_fallback_and_cooldown(monkeypatch):
