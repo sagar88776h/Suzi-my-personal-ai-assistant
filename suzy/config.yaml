@@ -59,6 +59,14 @@ stt:                      # Suzy's ears (faster-whisper, runs on your CPU)
   beam_size: 1            # 1 = fastest; 5 = slightly more accurate
   models_dir: models      # downloaded once, then works offline
 
+self_improvement:         # Suzy changing her own code
+  enabled: true           # she always asks before installing a change, and backs up first
+  auto_fix_errors: true   # when she finds a new error in her log, she starts fixing it on her own
+  max_steps: 40           # coding steps per change
+  context_tokens: 4500    # keep requests small for Groq's free tier (8,000 tokens/minute)
+  max_output_tokens: 3000
+  keep_backups: 10        # old versions kept in the backups folder
+
 tools:
   apps:
     fuzzy_threshold: 80   # how sure Suzy must be (0-100) before opening an app

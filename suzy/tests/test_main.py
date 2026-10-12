@@ -6,6 +6,8 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 import main
 from core.config import Config
 from core.llm import GeminiProvider, GroqProvider, LLMRouter
@@ -222,3 +224,62 @@ def test_mic_test_runs_speech_recognition(monkeypatch, capsys, tmp_path):
 def test_mic_test_without_model(monkeypatch, capsys, tmp_path):
     code, out = _mic_test(monkeypatch, capsys, 0.2, Config({"stt": {"models_dir": str(tmp_path)}}))
     assert code == 0 and "not downloaded yet" in out
+
+
+# ----------------------------------------------------------------- self-improvement wiring
+@pytest.fixture(autouse=True)
+def _never_self_improve_the_live_code(monkeypatch, request):
+    """main.main() must never start a background self-improvement job on the real code in tests."""
+    if "setup_self_improvement" not in request.node.name:
+        monkeypatch.setattr(main, "setup_self_improvement", lambda *args, **kwargs: None)
+
+
+class _Session:
+    def __init__(self):
+        self.said = []
+
+    def say_async(self, text):
+        self.said.append(text)
+
+    def stop_speaking(self):
+        pass
+
+
+def test_setup_self_improvement_reports_and_auto_fixes(tmp_path, monkeypatch, capsys):
+    from core.selfcode import SelfDevManager
+    from tools import self_dev
+
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "errors.log").write_text(
+        "2026-10-12 10:00:01,000 | ERROR   | MainThread | suzy.tools | Tool open_app crashed\n"
+        "Traceback (most recent call last):\n  File \"tools/apps.py\", line 4, in open_app\n"
+        "IndexError: list index out of range\n", encoding="utf-8")
+    started = []
+    monkeypatch.setattr(SelfDevManager, "start", lambda self, request: started.append(request) or "On it")
+    config = Config()
+    assistant, router, _registry = main.build_assistant(config)
+    ui = main.TerminalUI()
+    manager = main.setup_self_improvement(config, router, assistant, _Session(), ui, root=tmp_path)
+    out = capsys.readouterr().out
+    assert "I found an error in myself" in out and "IndexError" in out
+    assert len(started) == 1 and "IndexError" in started[0]
+    assert self_dev.MANAGER is manager and manager.context_line in assistant.context_providers
+
+    # Next start: same error already handled -> no second automatic attempt.
+    main.setup_self_improvement(config, router, assistant, _Session(), ui, root=tmp_path)
+    assert len(started) == 1
+
+
+def test_setup_self_improvement_restart_hook(tmp_path, monkeypatch):
+    exits = []
+    monkeypatch.setattr(main.os, "_exit", exits.append)
+    monkeypatch.setenv("SUZY_GUARDED", "1")
+    config = Config()
+    assistant, router, _registry = main.build_assistant(config)
+    ui = main.TerminalUI()
+    manager = main.setup_self_improvement(config, router, assistant, _Session(), ui, root=tmp_path)
+    ui.on_event("idle", None)
+    assert exits == []
+    manager.restart_pending = True
+    ui.on_event("idle", None)
+    assert exits == [main.RESTART_EXIT_CODE]

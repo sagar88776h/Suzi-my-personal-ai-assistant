@@ -79,6 +79,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "beam_size": 1,              # 1 = fastest; 5 = a little more accurate
         "models_dir": "models",
     },
+    "self_improvement": {
+        "enabled": True,             # Suzy may change her own code (always asks before installing)
+        "auto_fix_errors": True,     # start fixing new errors from the log on her own (still asks to install)
+        "max_steps": 40,             # coding steps per change
+        "context_tokens": 4500,      # per-request size; fits Groq's free 8,000 tokens/minute
+        "max_output_tokens": 3000,
+        "keep_backups": 10,
+    },
     "tools": {
         "apps": {
             "fuzzy_threshold": 80,     # score needed to open an app directly

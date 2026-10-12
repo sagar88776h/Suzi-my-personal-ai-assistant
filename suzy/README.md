@@ -8,8 +8,10 @@ system, and plenty more as the build goes on. She understands English and Hingli
 > Suzy has a real AI brain (Groq, with Gemini as a backup) that runs PC actions:
 > open apps, set the volume, tell the time and date, search Google, and report
 > system info. She **speaks** her replies in a natural female voice and
-> **listens** when you press Enter or **Ctrl+Alt+S**. The wake word, the floating
-> orb UI and the rest of the tools come in later phases (see the [Roadmap](#roadmap)).
+> **listens** when you press Enter or **Ctrl+Alt+S**. She can also **improve
+> herself**: ask her for a new ability or to fix a problem and she changes her own
+> code (see [Suzy improves herself](#suzy-improves-herself)). The wake word, the
+> floating orb UI and the rest of the tools come in later phases (see the [Roadmap](#roadmap)).
 
 ---
 
@@ -183,6 +185,44 @@ All tests should pass. They mock anything that would really change your PC.
 
 If `config.yaml` is missing or broken, Suzy falls back to safe defaults and tells you.
 
+## Suzy improves herself
+
+Ask Suzy for something she can't do yet, or tell her to fix a problem:
+
+> "Suzy, add a feature that tells me the latest cricket score."
+> "Suzy, khud ko improve karo, jab main 'good night' bolun to volume 20 kar dena."
+> "Suzy, fix your errors."
+
+What happens next:
+
+1. **She works on a private copy** of her code in the background (usually 2–10 minutes).
+   You can keep using her meanwhile, and lines like `(working on myself: editing tools/cricket.py)`
+   show her progress. "What's the status of your update?" also works.
+2. **She tests the change.** Her full test suite must pass, otherwise she keeps fixing it
+   or gives up and changes nothing.
+3. **She asks you.** She tells you what she changed and which files. Say **"yes, install it"**
+   to install, or **"discard it"**. She only installs after a clear yes in your latest message.
+4. **She backs up and restarts.** Her current code is saved in the `backups` folder first.
+5. **Automatic rescue.** If she crashes after an update, the guard (`guard.py`)
+   restores the previous version on its own and tells you. You can also say
+   **"undo your last update"** at any time.
+
+She also **notices her own errors**. On startup, if her error log has a new
+unexpected error, she starts fixing it by herself and asks before installing the fix.
+Turn that off with `self_improvement.auto_fix_errors: false` in `config.yaml`.
+
+**What she can change:** any of her own code and settings, except two files. `guard.py`
+is her rescue system, and `.env` holds your keys, which she can never read either.
+
+**Limits to know:**
+- She codes with the free Groq model, which is much weaker at programming than a
+  professional coding AI and has a small per-minute limit. Small and medium features and
+  bug fixes work best. Large ones may fail, and then nothing is changed. She waits
+  automatically when she hits the free limit, and may reply more slowly while she codes.
+- When you update Suzy with the installer, files she changed may be replaced by the new
+  version. The installer saves a copy of her code in `backups\installer-update-...`
+  first, and abilities she *added* (new files) are always kept.
+
 ## 3. How it works
 
 ```
@@ -243,6 +283,7 @@ Assistant ──► LLM router ──► Groq (retry once) ──► Gemini fall
 
 - [x] **Phase 1**: terminal chat, LLM tool calling with Groq→Gemini failover, and 5 basic tools
 - [x] **Phase 2**: Suzy speaks (edge-tts, offline fallback voice) and listens with push-to-talk (faster-whisper)
+- [x] **Self-improvement**: Suzy adds abilities and fixes her own bugs (with tests, your yes, backups and auto-rollback)
 - [ ] **Phase 3**: "Hey Suzy" wake word, voice activity detection, interruption, follow-up mode
 - [ ] **Phase 4**: the full tool set, the safety/confirmation layer, and tests for every tool
 - [ ] **Phase 5**: floating orb UI, chat panel, tray icon, settings window

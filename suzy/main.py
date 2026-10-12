@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import threading
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from core.assistant import Assistant, AssistantReply
@@ -37,10 +39,12 @@ from core.config import Config
 from core.hotkey import GlobalHotkey
 from core.llm import LLMRouter, ProviderStatus
 from core.logging_setup import setup_logging
+from core.paths import APP_DIR
+from core.selfcode import RESTART_EXIT_CODE, ErrorWatcher, SelfDevManager, fix_request
 from core.stt import SpeechToText, STTError, STTSettings
 from core.tts import TextToSpeech, TTSSettings
 from core.voice import VoiceSession
-from tools import apps
+from tools import apps, self_dev
 from tools.registry import ToolRegistry, load_all_tools
 
 log = logging.getLogger("suzy.main")
@@ -214,6 +218,7 @@ class TerminalUI:
         self._lock = threading.Lock()
         self._at_prompt = False  # main thread is waiting in input()
         self._reprompt = False   # an event interrupted the prompt; redraw it when idle
+        self.after_idle: Any = None  # called after every finished turn (used to restart after self-updates)
 
     def _print(self, text: str) -> None:
         with self._lock:
@@ -251,7 +256,13 @@ class TerminalUI:
             self._print(f"      ({payload})")
         elif kind == "error":
             self._print(f"Suzy: {payload}")
+        elif kind == "announce":
+            self._print(f"Suzy: {payload}")
+        elif kind == "progress":
+            self._print(f"      (working on myself: {payload})")
         elif kind == "idle":
+            if self.after_idle is not None:
+                self.after_idle()
             with self._lock:
                 # A hotkey turn finished while the main thread waits in input(): show the prompt again.
                 if self._reprompt:
@@ -392,6 +403,50 @@ def _transcription_check(config: Config, audio: Any) -> int:
     return 0
 
 
+# =========================================================================== self-improvement
+def restart_for_update(session: VoiceSession) -> None:
+    """Exit so guard.py restarts Suzy with her freshly installed code."""
+    session.stop_speaking()
+    if os.environ.get("SUZY_GUARDED") == "1":
+        print("\nSuzy: Restarting to load my update...\n", flush=True)
+    else:
+        print("\nSuzy: My update is installed. Please start me again (double-click 'Suzy') to load it.",
+              flush=True)
+    logging.shutdown()
+    os._exit(RESTART_EXIT_CODE)
+
+
+def setup_self_improvement(config: Config, router: LLMRouter, assistant: Assistant,
+                           session: VoiceSession, ui: TerminalUI, root: Path = APP_DIR) -> SelfDevManager:
+    """Connect the self-improvement system and report on the last update / new errors."""
+
+    def announce(text: str) -> None:
+        ui.on_event("announce", text)
+        session.say_async(text)
+
+    manager = SelfDevManager(config, router, root=root, notify=announce,
+                             progress=lambda text: ui.on_event("progress", text))
+    watcher = ErrorWatcher(root)
+    self_dev.configure(manager, watcher)
+    assistant.context_providers.append(manager.context_line)
+    ui.after_idle = lambda: restart_for_update(session) if manager.restart_pending else None
+
+    for message in manager.confirm_healthy_start():
+        print(f"Suzy: {message}")
+    errors = watcher.new_errors()
+    if errors and manager.enabled:
+        latest = errors[-1].splitlines()[-1].strip()
+        if config.get("self_improvement.auto_fix_errors", True) and not watcher.already_tried(errors[-1]):
+            watcher.mark_tried(errors[-1])
+            manager.start(fix_request(errors))
+            print(f"Suzy: I found an error in myself since last time ({latest[:120]}). "
+                  "I'm fixing it in the background and will ask you before installing the fix.")
+        else:
+            print(f"Suzy: Heads up - I hit {len(errors)} unexpected error(s) last time "
+                  f"({latest[:120]}). Say 'fix your errors' and I'll repair myself.")
+    return manager
+
+
 # =========================================================================== main
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Suzy - your desktop AI assistant")
@@ -452,6 +507,7 @@ def main(argv: list[str] | None = None) -> int:
     hello = greeting(config)
     print(f"Suzy: {hello}")
     voice.session.say_async(hello)
+    setup_self_improvement(config, router, assistant, voice.session, ui)
     try:
         run_terminal_chat(voice, registry, ui)
     finally:

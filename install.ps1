@@ -158,8 +158,15 @@ function Install-Suzy {
     if (-not (Test-Path (Join-Path $source 'main.py'))) { throw "The download did not contain Suzy's code." }
 
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    # Copy everything except your private/local files (.env, config.yaml, venv, logs, data).
-    & robocopy $source $InstallDir /E /XD .venv data logs models __pycache__ /XF .env config.yaml /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+    # Suzy may have changed her own code. This update replaces files it ships, so keep a
+    # full copy of her current code first. New abilities she added are never deleted.
+    if (Test-Path (Join-Path $InstallDir 'data\self_changes.jsonl')) {
+        $selfBackup = Join-Path $InstallDir ("backups\installer-update-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        & robocopy $InstallDir $selfBackup /E /XD .venv data logs models backups __pycache__ /XF .env /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+        Write-Note "Suzy had changed her own code - saved a copy in $selfBackup before updating."
+    }
+    # Copy everything except your private/local files (.env, config.yaml, venv, logs, data, backups).
+    & robocopy $source $InstallDir /E /XD .venv data logs models backups __pycache__ /XF .env config.yaml /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "Copying Suzy's files failed (robocopy code $LASTEXITCODE)." }
     $configPath = Join-Path $InstallDir 'config.yaml'
     $newConfig = Join-Path $source 'config.yaml'
@@ -240,7 +247,8 @@ function Install-Suzy {
         '@echo off',
         'title Suzy',
         'cd /d "%~dp0"',
-        '".venv\Scripts\python.exe" main.py %*',
+        'rem guard.py starts Suzy, restarts her after self-updates and rolls back broken ones.',
+        '".venv\Scripts\python.exe" guard.py %*',
         'echo.',
         'pause'
     ) -join "`r`n"
@@ -296,7 +304,7 @@ function Install-Suzy {
     Write-Host ""
     if (Confirm-Default "Start Suzy now?") {
         Push-Location $InstallDir
-        & $venvPython main.py
+        & $venvPython guard.py
         Pop-Location
     }
 }

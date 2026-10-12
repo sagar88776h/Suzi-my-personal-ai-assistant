@@ -193,14 +193,17 @@ class BaseProvider(ABC):
         return bool(self.api_key)
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
-             system_prompt: str) -> LLMResponse:
-        """Send the conversation and return text and/or tool calls. Raises LLMError."""
+             system_prompt: str, options: dict[str, Any] | None = None) -> LLMResponse:
+        """Send the conversation and return text and/or tool calls. Raises LLMError.
+
+        ``options`` may override ``max_tokens`` and ``reasoning_effort`` for one call.
+        """
         if not self.is_configured:
             raise LLMError(self.name, LLMErrorKind.NOT_CONFIGURED, f"no API key set for {self.name}")
         while True:
             model = self.model
             try:
-                return self._chat_with_model(model, messages, tools, system_prompt)
+                return self._chat_with_model(model, messages, tools, system_prompt, options or {})
             except LLMError as exc:
                 if exc.kind is not LLMErrorKind.MODEL_UNAVAILABLE or self._model_index + 1 >= len(self.models):
                     raise
@@ -210,7 +213,8 @@ class BaseProvider(ABC):
 
     @abstractmethod
     def _chat_with_model(self, model: str, messages: list[dict[str, Any]],
-                         tools: list[dict[str, Any]], system_prompt: str) -> LLMResponse:
+                         tools: list[dict[str, Any]], system_prompt: str,
+                         options: dict[str, Any]) -> LLMResponse:
         """Make one request with a specific model. Raises LLMError."""
 
 
@@ -263,8 +267,10 @@ class GroqProvider(BaseProvider):
             isinstance(exc, groq.BadRequestError) and _mentions_missing_model(str(exc))
         ):
             kind = LLMErrorKind.MODEL_UNAVAILABLE
-        elif isinstance(exc, (groq.BadRequestError, groq.UnprocessableEntityError)):
-            kind = LLMErrorKind.BAD_REQUEST
+        elif isinstance(exc, (groq.BadRequestError, groq.UnprocessableEntityError)) or (
+            isinstance(exc, groq.APIStatusError) and getattr(exc, "status_code", None) == 413
+        ):
+            kind = LLMErrorKind.BAD_REQUEST  # includes "request too large" (413)
         elif isinstance(exc, (ConnectionError, TimeoutError)):
             kind = LLMErrorKind.NETWORK
         else:
@@ -272,20 +278,22 @@ class GroqProvider(BaseProvider):
         return LLMError(self.name, kind, str(exc)[:500])
 
     def _chat_with_model(self, model: str, messages: list[dict[str, Any]],
-                         tools: list[dict[str, Any]], system_prompt: str) -> LLMResponse:
+                         tools: list[dict[str, Any]], system_prompt: str,
+                         options: dict[str, Any]) -> LLMResponse:
         client = self._get_client()
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": self.convert_messages(messages, system_prompt),
             "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "max_tokens": int(options.get("max_tokens", self.max_tokens)),
         }
         if tools:
             kwargs["tools"] = self.convert_tools(tools)
             kwargs["tool_choice"] = "auto"
-        if self.reasoning_effort and "gpt-oss" in model:
+        effort = options.get("reasoning_effort", self.reasoning_effort)
+        if effort and "gpt-oss" in model:
             # gpt-oss models "think" before answering; low effort keeps replies snappy.
-            kwargs["reasoning_effort"] = self.reasoning_effort
+            kwargs["reasoning_effort"] = effort
         try:
             completion = client.chat.completions.create(**kwargs)
         except Exception as exc:  # noqa: BLE001 - classified below
@@ -402,14 +410,15 @@ class GeminiProvider(BaseProvider):
         return LLMError(self.name, kind, text[:500])
 
     def _chat_with_model(self, model: str, messages: list[dict[str, Any]],
-                         tools: list[dict[str, Any]], system_prompt: str) -> LLMResponse:
+                         tools: list[dict[str, Any]], system_prompt: str,
+                         options: dict[str, Any]) -> LLMResponse:
         client = self._get_client()
         from google.genai import types
 
         config_kwargs: dict[str, Any] = {
             "system_instruction": system_prompt,
             "temperature": self.temperature,
-            "max_output_tokens": self.max_tokens,
+            "max_output_tokens": int(options.get("max_tokens", self.max_tokens)),
             "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
         }
         if tools:
@@ -557,14 +566,14 @@ class LLMRouter:
         return healthy + broken
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
-             system_prompt: str) -> LLMResponse:
+             system_prompt: str, options: dict[str, Any] | None = None) -> LLMResponse:
         errors: list[LLMError] = []
         for provider in self._ordered_providers():
             attempts = 2  # first try + one retry
             for attempt in range(1, attempts + 1):
                 try:
                     started = time.perf_counter()
-                    response = provider.chat(messages, tools, system_prompt)
+                    response = provider.chat(messages, tools, system_prompt, options)
                     log.debug("%s answered in %.2fs (%d tool calls)", provider.name,
                               time.perf_counter() - started, len(response.tool_calls))
                     self.last_provider = provider.name

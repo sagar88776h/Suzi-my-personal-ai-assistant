@@ -18,6 +18,7 @@ from typing import Any
 from core.config import Config
 from core.llm import LLMError, LLMRouter, LLMUnavailableError
 from core.prompts import build_system_prompt
+from tools import context as tool_context
 from tools.registry import ToolRegistry, ToolResult
 
 log = logging.getLogger("suzy.assistant")
@@ -53,6 +54,8 @@ class Assistant:
         self.clock = clock
         self.history: list[dict[str, Any]] = []
         self._lock = threading.Lock()
+        # Extra live context for the system prompt (e.g. "an update is ready to install").
+        self.context_providers: list[Callable[[], str]] = []
 
     # ------------------------------------------------------------------ settings
     @property
@@ -64,11 +67,23 @@ class Assistant:
         return max(1, int(self.config.get("assistant.max_tool_rounds", 5)))
 
     def system_prompt(self) -> str:
-        return build_system_prompt(
+        prompt = build_system_prompt(
             assistant_name=self.config.get("assistant.name", "Suzy"),
             user_name=self.config.get("user.name", "Sagar"),
             now=self.clock(),
         )
+        extras = []
+        for provider in self.context_providers:
+            try:
+                text = provider()
+            except Exception:  # noqa: BLE001 - context is optional, never fatal
+                log.exception("Context provider failed")
+                continue
+            if text:
+                extras.append(f"- {text}")
+        if extras:
+            prompt += "\nCURRENT STATUS\n" + "\n".join(extras) + "\n"
+        return prompt
 
     # ------------------------------------------------------------------ public API
     def reset(self) -> None:
@@ -85,6 +100,7 @@ class Assistant:
         with self._lock:
             checkpoint = len(self.history)
             self.history.append({"role": "user", "content": text})
+            tool_context.set_user_message(text)
             actions: list[ActionRecord] = []
             try:
                 reply = self._run(actions)

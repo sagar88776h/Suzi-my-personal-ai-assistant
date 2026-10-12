@@ -234,7 +234,7 @@ class ScriptedProvider(BaseProvider):
         self.outcomes = list(outcomes)
         self.calls = 0
 
-    def _chat_with_model(self, model, messages, tools, system_prompt):
+    def _chat_with_model(self, model, messages, tools, system_prompt, options):
         self.calls += 1
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):

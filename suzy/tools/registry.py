@@ -14,6 +14,7 @@ from __future__ import annotations
 import importlib
 import json
 import logging
+import pkgutil
 import threading
 import time
 from collections.abc import Callable
@@ -26,13 +27,8 @@ from tools.winutils import PlatformNotSupportedError
 log = logging.getLogger("suzy.tools")
 action_log = logging.getLogger("suzy.actions")
 
-# Tool modules loaded by load_all_tools(). Each one registers its tools on import.
-TOOL_MODULES: tuple[str, ...] = (
-    "tools.apps",
-    "tools.system",
-    "tools.web",
-    "tools.productivity",
-)
+# Modules in the tools/ package that are infrastructure, not tools.
+NON_TOOL_MODULES = {"registry", "safety", "winutils", "context"}
 
 
 @dataclass
@@ -257,9 +253,24 @@ def tool(
     return decorator
 
 
+def tool_module_names() -> list[str]:
+    """Every tool module in the tools/ package. A new file = a new set of abilities."""
+    import tools
+
+    names = []
+    for info in pkgutil.iter_modules(tools.__path__):
+        if not info.ispkg and info.name not in NON_TOOL_MODULES and not info.name.startswith("_"):
+            names.append(f"tools.{info.name}")
+    return sorted(names)
+
+
 def load_all_tools() -> ToolRegistry:
-    """Import every tool module so its tools register themselves."""
-    for module_name in TOOL_MODULES:
+    """Import every tool module so its tools register themselves.
+
+    A module that fails to import is skipped (and logged) so one broken tool
+    file can never stop Suzy from starting.
+    """
+    for module_name in tool_module_names():
         try:
             importlib.import_module(module_name)
         except Exception:  # noqa: BLE001 - one broken module must not kill the rest
