@@ -36,6 +36,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "max_context_turns": 20,   # conversation turns sent to the LLM
         "max_tool_rounds": 5,      # tool-call rounds allowed per request
         "quick_replies": True,     # say simple action results directly (skips a 2nd AI call)
+        "startup_greeting": "Hello {name}, welcome back.",  # said when Suzy starts with Windows
     },
     "llm": {
         "provider": "groq",

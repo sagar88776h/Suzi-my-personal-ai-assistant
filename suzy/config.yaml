@@ -12,6 +12,7 @@ assistant:
   max_context_turns: 20   # how many past conversation turns the brain remembers
   max_tool_rounds: 5      # max chained PC actions for a single request
   quick_replies: true     # say simple results ("Opening Notepad.") directly - about 1 s faster
+  startup_greeting: "Hello {name}, welcome back."  # said when Suzy starts with Windows
 
 llm:
   provider: groq          # primary brain: groq | gemini

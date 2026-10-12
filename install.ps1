@@ -309,6 +309,28 @@ function Install-Suzy {
         Write-Note "Couldn't create the desktop shortcut; you can double-click '$launcher' instead."
     }
 
+    # Start with Windows: a minimised shortcut in the Startup folder, run with --startup so
+    # Suzy greets "Hello <name>, welcome back."
+    $startupLink = Join-Path ([Environment]::GetFolderPath('Startup')) 'Suzy.lnk'
+    Write-Host ""
+    if (Confirm-Default "Start Suzy automatically when Windows starts (she'll say 'welcome back')?") {
+        try {
+            $autoShell = New-Object -ComObject WScript.Shell
+            $auto = $autoShell.CreateShortcut($startupLink)
+            $auto.TargetPath = $launcher
+            $auto.Arguments = '--startup'
+            $auto.WorkingDirectory = $InstallDir
+            $auto.WindowStyle = 7
+            $auto.Description = 'Start Suzy when Windows starts'
+            $auto.Save()
+            Write-Ok "Suzy will start with Windows and welcome you back."
+        } catch {
+            Write-Note "Couldn't add Suzy to Windows startup. You can ask her: 'Suzy, start with Windows'."
+        }
+    } else {
+        Remove-Item $startupLink -Force -ErrorAction SilentlyContinue
+    }
+
     # Tidy up the leftovers from a manual attempt in the home folder.
     $strayVenv = Join-Path $HOME '.venv'
     if ((Test-Path (Join-Path $strayVenv 'pyvenv.cfg')) -and ($strayVenv -ne $venvDir)) {

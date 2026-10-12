@@ -163,6 +163,11 @@ free with the same key, very good at Hindi and Hinglish). Your PC's own model ta
 automatically when you're offline. Simple actions are answered straight away, e.g.
 "Opening Notepad.", without a second AI round-trip.
 
+**Starts with Windows:** the installer asks whether Suzy should start automatically when you
+turn on the PC. She then opens minimised and greets you: **"Hello Sagar, welcome back."**
+Change the words with `assistant.startup_greeting` in `config.yaml`, or switch it on or off
+any time by saying *"Suzy, start with Windows"* / *"Suzy, don't start with Windows"*.
+
 **Push-to-talk also works:** press **Enter** on an empty line, or **Ctrl+Alt+S** from
 any window, then speak and pause.
 

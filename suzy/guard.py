@@ -114,6 +114,7 @@ def run(argv: list[str]) -> int:
 
         if code == RESTART_EXIT_CODE:
             print("\n[Guard] Restarting Suzy...\n")
+            argv = [arg for arg in argv if arg != "--startup"]  # say "welcome back" only once
             continue
         if code != 0 and MARKER.exists():
             try:

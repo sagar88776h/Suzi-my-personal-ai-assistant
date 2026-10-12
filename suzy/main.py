@@ -19,8 +19,10 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import socket
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -267,10 +269,42 @@ def run_brain_check(router: LLMRouter) -> list[ProviderStatus]:
     return statuses
 
 
-def greeting(config: Config, now: datetime | None = None) -> str:
+def greeting(config: Config, now: datetime | None = None, startup: bool = False) -> str:
+    name = config.get("user.name", "Sagar")
+    if startup:  # started together with Windows
+        template = str(config.get("assistant.startup_greeting", "Hello {name}, welcome back."))
+        try:
+            return template.format(name=name)
+        except (KeyError, IndexError, ValueError):
+            return template
     hour = (now or datetime.now()).hour
     part = "morning" if 5 <= hour < 12 else "afternoon" if 12 <= hour < 17 else "evening"
-    return f"Good {part}, {config.get('user.name', 'Sagar')}. Suzy here - what can I do for you?"
+    return f"Good {part}, {name}. Suzy here - what can I do for you?"
+
+
+def wait_for_internet(timeout: float = 20.0, host: str = "speech.platform.bing.com") -> bool:
+    """Right after Windows starts, Wi-Fi may still be connecting: wait (briefly) for it so the
+    welcome is spoken in Suzy's natural voice instead of the offline one."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with socket.create_connection((host, 443), timeout=2):
+                return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(1)
+
+
+def greet_after_startup(session: VoiceSession, text: str, timeout: float = 20.0) -> threading.Thread:
+    def run() -> None:
+        if not wait_for_internet(timeout):
+            log.info("No internet %.0fs after startup; greeting with the offline voice", timeout)
+        session.say(text)
+
+    thread = threading.Thread(target=run, name="StartupGreeting", daemon=True)
+    thread.start()
+    return thread
 
 
 def print_reply(reply: AssistantReply, show_actions: bool) -> None:
@@ -598,6 +632,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-voice", action="store_true", help="disable the microphone and hotkey")
     parser.add_argument("--mic-test", action="store_true", help="test the microphone and exit")
     parser.add_argument("--voices", action="store_true", help="listen to the voice options and pick one")
+    parser.add_argument("--startup", action="store_true", help="started with Windows: say 'welcome back'")
     args = parser.parse_args(argv)
 
     _configure_console()
@@ -639,6 +674,11 @@ def main(argv: list[str] | None = None) -> int:
         voice.session.say(reply.text)
         return 0
 
+    hello = greeting(config, startup=args.startup)
+    if args.startup:  # greet first: Sagar just turned the PC on
+        print(f"Suzy: {hello}")
+        greet_after_startup(voice.session, hello)
+
     if not args.no_check:
         run_brain_check(router)
     for problem in voice.problems:
@@ -646,9 +686,9 @@ def main(argv: list[str] | None = None) -> int:
     for note in voice.notes:
         print(f"      {note}")
 
-    hello = greeting(config)
-    print(f"Suzy: {hello}")
-    voice.session.say_async(hello)
+    if not args.startup:
+        print(f"Suzy: {hello}")
+        voice.session.say_async(hello)
     setup_self_improvement(config, router, assistant, voice.session, ui)
     try:
         run_terminal_chat(voice, registry, ui)
