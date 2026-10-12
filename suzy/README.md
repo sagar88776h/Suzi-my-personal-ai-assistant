@@ -187,6 +187,10 @@ Try these (type them or say them):
 | `search google for best biryani in Pune`  | Your browser opens the search                     |
 | `how's my PC doing?`                      | CPU, RAM, battery, disk and uptime summary        |
 | `open chrome and set volume to 50`        | Both actions, one after the other                 |
+| `close this window` / `close Chrome`      | Closes it like clicking X (apps still ask to save) |
+| `close this tab` / `switch to Word`       | Closes the browser tab / brings Word to the front |
+| `minimize this` / `show the desktop`      | Minimises the window / all windows                |
+| `press ctrl+shift+t` / `type hello`       | Presses keys / types into the window you're using |
 
 Commands you can type in the chat: `/help`, `/tools` (lists everything Suzy can
 do), `/mute` (voice off/on), `/reset` (forgets the conversation), `exit`.

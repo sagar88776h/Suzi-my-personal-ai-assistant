@@ -28,7 +28,7 @@ log = logging.getLogger("suzy.tools")
 action_log = logging.getLogger("suzy.actions")
 
 # Modules in the tools/ package that are infrastructure, not tools.
-NON_TOOL_MODULES = {"registry", "safety", "winutils", "context"}
+NON_TOOL_MODULES = {"registry", "safety", "winutils", "context", "win32"}
 
 
 @dataclass

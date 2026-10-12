@@ -61,7 +61,7 @@ from core.stt import (
 )
 from core.tts import EdgeSynthesizer, TextToSpeech, TTSSettings
 from core.voice import VoiceSession
-from tools import apps, self_dev, voice_settings
+from tools import apps, self_dev, voice_settings, win32
 from tools.registry import ToolRegistry, load_all_tools
 
 log = logging.getLogger("suzy.main")
@@ -103,6 +103,7 @@ def build_assistant(config: Config) -> tuple[Assistant, LLMRouter, ToolRegistry]
         extra_search_dirs=config.get("tools.apps.extra_search_dirs", []) or [],
     )
     apps.prewarm_index()
+    win32.TRACKER.start()  # remembers the window Sagar uses, so "close this window" never closes Suzy
     router = LLMRouter.from_config(config)
     return Assistant(config, router, registry), router, registry
 
