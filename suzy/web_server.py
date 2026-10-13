@@ -283,22 +283,48 @@ class SuzyWebServer:
         return web.json_response({"mood": current.value, "instructions": get_mood_instructions(current)})
 
     async def handle_tts(self, request: web.Request) -> web.Response:
-        """Synthesize text via Edge-TTS and stream MP3 bytes directly to client."""
+        """Synthesize text via ElevenLabs (Zara: OtEfb2LVzIE45wdYe54M) or Edge-TTS and stream MP3 bytes."""
         try:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "Invalid JSON"}, status=400)
 
         text = (body.get("text") or "").strip()
-        voice = body.get("voice") or self.config.get("tts.voice", "en-IN-NeerjaExpressiveNeural")
+        voice = body.get("voice") or self.config.get("tts.voice", "OtEfb2LVzIE45wdYe54M")
         rate = body.get("rate") or "+0%"
 
         if not text:
             return web.json_response({"error": "Empty text"}, status=400)
 
+        # Check for ElevenLabs Zara voice
+        eleven_key = os.getenv("ELEVENLABS_API_KEY") or os.getenv("ELEVEN_API_KEY")
+        if (voice.startswith("OtEfb") or voice.lower() == "zara") and eleven_key:
+            try:
+                import httpx
+                voice_id = "OtEfb2LVzIE45wdYe54M"
+                url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format=mp3_44100_128"
+                headers = {
+                    "xi-api-key": eleven_key,
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "text": text,
+                    "model_id": "eleven_turbo_v2_5",
+                    "voice_settings": {"stability": 0.5, "similarity_boost": 0.8},
+                }
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.post(url, headers=headers, json=payload)
+                    if resp.status_code == 200:
+                        return web.Response(body=resp.content, content_type="audio/mpeg")
+                    log.warning("ElevenLabs returned %d: %s; falling back to Edge-TTS", resp.status_code, resp.text[:120])
+            except Exception as e:
+                log.warning("ElevenLabs request failed (%s); falling back to Edge-TTS", e)
+
+        # Fallback to Edge-TTS
+        fallback_voice = voice if not voice.startswith("OtEfb") and voice.lower() != "zara" else "en-IN-NeerjaExpressiveNeural"
         try:
             import edge_tts
-            communicate = edge_tts.Communicate(text, voice, rate=rate)
+            communicate = edge_tts.Communicate(text, fallback_voice, rate=rate)
             audio_bytes = bytearray()
             async for chunk in communicate.stream():
                 if chunk.get("type") == "audio":
@@ -306,7 +332,7 @@ class SuzyWebServer:
 
             return web.Response(body=bytes(audio_bytes), content_type="audio/mpeg")
         except Exception as exc:
-            log.warning("Edge-TTS streaming synthesis error: %s", exc)
+            log.warning("TTS streaming synthesis error: %s", exc)
             return web.json_response({"error": f"TTS synthesis failed: {exc}"}, status=500)
 
     async def handle_action_confirm(self, request: web.Request) -> web.Response:

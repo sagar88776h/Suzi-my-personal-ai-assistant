@@ -197,6 +197,73 @@ def decode_mp3(data: bytes, sample_rate: int = EDGE_SAMPLE_RATE) -> np.ndarray:
     return np.frombuffer(decoded.samples, dtype=np.float32).copy()
 
 
+class ElevenLabsSynthesizer:
+    """Natural conversational voice from ElevenLabs API (Zara: OtEfb2LVzIE45wdYe54M)."""
+
+    name = "elevenlabs"
+
+    def __init__(
+        self,
+        voice_id: str = "OtEfb2LVzIE45wdYe54M",
+        api_key: str | None = None,
+        model_id: str = "eleven_turbo_v2_5",
+        stability: float = 0.5,
+        similarity_boost: float = 0.8,
+        fallback: Synthesizer | None = None,
+        timeout: int = 15,
+    ) -> None:
+        self.voice_id = voice_id
+        self.api_key = api_key
+        self.model_id = model_id
+        self.stability = stability
+        self.similarity_boost = similarity_boost
+        self.fallback = fallback
+        self.timeout = timeout
+
+    def _fetch_sync(self, text: str) -> bytes:
+        import httpx
+
+        key = self.api_key or os.getenv("ELEVENLABS_API_KEY") or os.getenv("ELEVEN_API_KEY")
+        if not key:
+            raise SynthesisError("no ELEVENLABS_API_KEY configured in .env", network=False)
+
+        url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}?output_format=mp3_44100_128"
+        headers = {
+            "xi-api-key": key,
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "text": text,
+            "model_id": self.model_id,
+            "voice_settings": {
+                "stability": self.stability,
+                "similarity_boost": self.similarity_boost,
+            },
+        }
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                res = client.post(url, headers=headers, json=payload)
+                if res.status_code == 401:
+                    raise SynthesisError("ElevenLabs API key is invalid or unauthorized", network=False)
+                if res.status_code == 429:
+                    raise SynthesisError("ElevenLabs quota or rate limit exceeded", network=False)
+                if res.status_code != 200:
+                    raise SynthesisError(f"ElevenLabs error {res.status_code}: {res.text[:120]}")
+                return res.content
+        except httpx.RequestError as exc:
+            raise SynthesisError(f"cannot reach ElevenLabs: {exc}", network=True) from exc
+
+    def synthesize(self, text: str, voice: str | None = None) -> tuple[np.ndarray, int]:
+        try:
+            mp3 = self._fetch_sync(text)
+            return decode_mp3(mp3, sample_rate=44100), 44100
+        except SynthesisError as exc:
+            if self.fallback:
+                log.warning("ElevenLabs Zara voice failed (%s); falling back to %s", exc, self.fallback.name)
+                return self.fallback.synthesize(text, voice)
+            raise
+
+
 class OfflineSynthesizer:
     """The Windows built-in voice (SAPI5) via pyttsx3. Works without internet."""
 
@@ -276,13 +343,16 @@ def read_wav(path: str) -> tuple[np.ndarray, int]:
 @dataclass
 class TTSSettings:
     enabled: bool = True
-    voice: str = "en-IN-NeerjaExpressiveNeural"
-    fallback_voice: str = "en-IN-NeerjaNeural"
+    provider: str = "elevenlabs"  # elevenlabs | edge | offline
+    voice: str = "OtEfb2LVzIE45wdYe54M"  # Zara (https://elevenlabs.io/voices/OtEfb2LVzIE45wdYe54M)
+    fallback_voice: str = "en-IN-NeerjaExpressiveNeural"
     hindi_voice: str | None = "hi-IN-SwaraNeural"  # speaks any reply that contains Hindi (Devanagari)
     rate: str = "+0%"
     pitch: str = "+0Hz"
     volume: str = "+0%"
     offline_fallback: bool = True
+    elevenlabs_voice_id: str = "OtEfb2LVzIE45wdYe54M"
+    elevenlabs_model_id: str = "eleven_turbo_v2_5"
 
     @classmethod
     def from_config(cls, config: Any) -> TTSSettings:
@@ -297,6 +367,7 @@ class TTSSettings:
 
         return cls(
             enabled=bool(config.get("tts.enabled", True)),
+            provider=str(config.get("tts.provider", defaults.provider)),
             voice=str(config.get("tts.voice", defaults.voice)),
             fallback_voice=str(config.get("tts.fallback_voice", defaults.fallback_voice)),
             rate=safe(normalize_rate, "tts.rate", defaults.rate),
@@ -304,6 +375,8 @@ class TTSSettings:
             volume=safe(normalize_rate, "tts.volume", defaults.volume),
             offline_fallback=bool(config.get("tts.offline_fallback", True)),
             hindi_voice=config.get("tts.hindi_voice", defaults.hindi_voice) or None,
+            elevenlabs_voice_id=str(config.get("tts.elevenlabs.voice_id", defaults.elevenlabs_voice_id)),
+            elevenlabs_model_id=str(config.get("tts.elevenlabs.model_id", defaults.elevenlabs_model_id)),
         )
 
 
@@ -314,10 +387,33 @@ class TextToSpeech:
                  primary: Synthesizer | None = None, offline: Synthesizer | None = None) -> None:
         self.settings = settings or TTSSettings()
         self.player = player or Player()
-        self.primary: Synthesizer = primary or EdgeSynthesizer(
-            self.settings.voice, self.settings.fallback_voice, self.settings.rate,
-            self.settings.pitch, self.settings.volume,
+
+        edge_fallback = EdgeSynthesizer(
+            self.settings.fallback_voice or "en-IN-NeerjaExpressiveNeural",
+            "en-IN-NeerjaNeural",
+            self.settings.rate,
+            self.settings.pitch,
+            self.settings.volume,
         )
+
+        if primary is not None:
+            self.primary = primary
+        elif (
+            self.settings.provider == "elevenlabs"
+            or self.settings.voice.startswith("OtEfb")
+            or self.settings.voice.lower() == "zara"
+        ):
+            self.primary = ElevenLabsSynthesizer(
+                voice_id=self.settings.elevenlabs_voice_id or self.settings.voice,
+                model_id=self.settings.elevenlabs_model_id,
+                fallback=edge_fallback,
+            )
+        else:
+            self.primary = EdgeSynthesizer(
+                self.settings.voice, self.settings.fallback_voice, self.settings.rate,
+                self.settings.pitch, self.settings.volume,
+            )
+
         self.offline: Synthesizer | None = offline
         if self.offline is None and self.settings.offline_fallback:
             rate_number = int(self.settings.rate.rstrip("%"))

@@ -20,7 +20,7 @@
     isPlayingAudio: false,
     pendingAction: null,
     reducedMotion: false,
-    selectedVoice: "en-IN-NeerjaExpressiveNeural",
+    selectedVoice: "OtEfb2LVzIE45wdYe54M",
     speechRate: "+0%",
   };
 

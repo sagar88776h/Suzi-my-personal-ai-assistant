@@ -58,8 +58,14 @@ voice:
 
 tts:                      # Suzy's voice
   enabled: true
-  voice: en-IN-NeerjaExpressiveNeural  # hear all voices: double-click "Suzy Voices" (or: main.py --voices)
-  fallback_voice: en-IN-NeerjaNeural
+  provider: elevenlabs    # elevenlabs | edge | offline
+  voice: OtEfb2LVzIE45wdYe54M  # Zara (https://elevenlabs.io/voices/OtEfb2LVzIE45wdYe54M)
+  elevenlabs:
+    voice_id: OtEfb2LVzIE45wdYe54M
+    model_id: eleven_turbo_v2_5
+    stability: 0.5
+    similarity_boost: 0.8
+  fallback_voice: en-IN-NeerjaExpressiveNeural
   hindi_voice: hi-IN-SwaraNeural  # reads replies with Hindi words (null = always use the voice above)
   rate: "+0%"             # speed: "+15%" faster, "-10%" slower
   pitch: "+0Hz"           # "+5Hz" higher, "-5Hz" lower
