@@ -11,9 +11,11 @@ assistant:
   name: Suzy
   max_context_turns: 20   # how many past conversation turns the brain remembers
   max_tool_rounds: 5      # max chained PC actions for a single request
+  quick_replies: true     # say simple results ("Opening Notepad.") directly - about 1 s faster
+  startup_greeting: "Hello {name}, welcome back."  # said when Suzy starts with Windows
 
 llm:
-  provider: groq          # primary brain: groq | gemini
+  provider: groq          # primary brain: groq | ollama | gemini
   fallback_provider: gemini
   temperature: 0.6
   max_tokens: 2048
@@ -24,12 +26,64 @@ llm:
       - openai/gpt-oss-120b
       - openai/gpt-oss-20b
     reasoning_effort: low # gpt-oss "thinking" effort: low | medium | high
+  ollama:                 # Ollama Cloud (key: OLLAMA_API_KEY in .env) or Ollama on this PC
+    host: https://ollama.com   # for Ollama on this PC: http://localhost:11434 (no key needed)
+    models:
+      - gpt-oss:120b
+      - gpt-oss:20b
+    think: low
   gemini:
     models:
       - gemini-flash-latest
       - gemini-flash-lite-latest
       - gemini-2.5-flash
     thinking_budget: null # null = model default; 0 disables thinking on 2.5 models
+
+voice:
+  enabled: true           # microphone + push-to-talk
+  hotkey: ctrl+alt+s      # push-to-talk from any window
+  input_device: null      # null = Windows default mic, or part of its name, e.g. "Realtek" (see: --mic-test)
+  energy_threshold: 0.006 # how loud counts as speech; lower = more sensitive (see: --mic-test)
+  max_record_seconds: 15  # longest single request
+  silence_seconds: 1.2    # how long a pause ends what you're saying
+  no_speech_timeout: 6    # stop listening if you say nothing for this long
+  sound_cues: true        # chime when Suzy starts / stops listening
+  wake_word:              # always-on listening for her name (offline)
+    enabled: true         # say "Suzy", "Hi Suzy", "Hello Suzy" - or "Hey Suzy, open Notepad"
+    model: tiny           # name checker: tiny (fastest) or base (more accurate, a bit slower)
+    followup_seconds: 8   # after she answers, ask the next thing without her name (0 = off)
+    command_timeout: 6    # after "Suzy", how long she waits for your request
+    vad_threshold: 0.5    # 0-1: raise if she wakes up by mistake, lower if she misses you
+    end_silence: 0.7      # pause (seconds) that ends what you're saying
+
+tts:                      # Suzy's voice
+  enabled: true
+  voice: en-IN-NeerjaExpressiveNeural  # hear all voices: double-click "Suzy Voices" (or: main.py --voices)
+  fallback_voice: en-IN-NeerjaNeural
+  hindi_voice: hi-IN-SwaraNeural  # reads replies with Hindi words (null = always use the voice above)
+  rate: "+0%"             # speed: "+15%" faster, "-10%" slower
+  pitch: "+0Hz"           # "+5Hz" higher, "-5Hz" lower
+  volume: "+0%"
+  offline_fallback: true  # use the Windows built-in voice when there's no internet
+
+stt:                      # Suzy's ears
+  engine: groq            # groq = fast cloud Whisper (free, same key, ~0.5 s); local = only this PC (slower)
+  cloud_model: whisper-large-v3-turbo
+  model: small            # local model (also the backup when offline): tiny | base | small | medium
+  device: cpu
+  compute_type: int8
+  language: null          # null = auto (English / Hindi); "en" to force English
+  allowed_languages: [en, hi]
+  beam_size: 1            # 1 = fastest; 5 = slightly more accurate
+  models_dir: models      # downloaded once, then works offline
+
+self_improvement:         # Suzy changing her own code
+  enabled: true           # she always asks before installing a change, and backs up first
+  auto_fix_errors: true   # when she finds a new error in her log, she starts fixing it on her own
+  max_steps: 40           # coding steps per change
+  context_tokens: 4500    # keep requests small for Groq's free tier (8,000 tokens/minute)
+  max_output_tokens: 3000
+  keep_backups: 10        # old versions kept in the backups folder
 
 tools:
   apps:

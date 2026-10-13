@@ -21,7 +21,8 @@ class FakeLLM:
         self.seen: list[list[dict]] = []
         self.prompts: list[str] = []
 
-    def chat(self, messages, tools, system_prompt):
+    def chat(self, messages, tools, system_prompt, options=None):
+        self.options = options
         self.seen.append([dict(m) for m in messages])
         self.prompts.append(system_prompt)
         outcome = self.outcomes.pop(0)
@@ -55,7 +56,9 @@ def reg():
     return registry
 
 
-def make(llm, reg, **config):
+def make(llm, reg, quick=False, **config):
+    """Most tests exercise the full tool loop, so quick replies are off unless asked for."""
+    config.setdefault("assistant", {}).setdefault("quick_replies", quick)
     return Assistant(Config(config), llm, reg, clock=lambda: datetime(2026, 10, 12, 15, 45))
 
 
@@ -174,3 +177,55 @@ def test_reset(reg):
     assistant.process("hello")
     assistant.reset()
     assert assistant.history == []
+
+
+def test_chat_may_use_another_model_when_main_one_is_busy(reg):
+    llm = FakeLLM(text("hi"))
+    make(llm, reg).process("hello")
+    assert llm.options == {"rotate_on_rate_limit": True}
+
+
+# ----------------------------------------------------------------- quick replies
+def test_quick_reply_skips_second_llm_call(reg):
+    llm = FakeLLM(calls(("open_app", {"name": "Notepad"})))
+    assistant = make(llm, reg, quick=True)
+    reply = assistant.process("open notepad")
+    assert reply.text == "Opening Notepad." and len(llm.seen) == 1
+    assert [m["role"] for m in assistant.history] == ["user", "assistant", "tool", "assistant"]
+
+
+def test_quick_reply_joins_several_actions(reg):
+    llm = FakeLLM(calls(("open_app", {"name": "Chrome"}), ("tell_time", {})))
+    assert make(llm, reg, quick=True).process("open chrome and tell the time").text == \
+        "Opening Chrome. It's 3:45 PM."
+
+
+def test_failed_action_still_goes_to_the_llm(reg):
+    llm = FakeLLM(calls(("open_app", {})), text("Which app should I open?"))
+    assert make(llm, reg, quick=True).process("open").text == "Which app should I open?"
+    assert len(llm.seen) == 2
+
+
+def test_hinglish_gets_an_llm_reply(reg):
+    llm = FakeLLM(calls(("open_app", {"name": "Notepad"})), text("Notepad khol diya!"))
+    assert make(llm, reg, quick=True).process("notepad kholo").text == "Notepad khol diya!"
+
+
+def test_data_tools_are_explained_by_the_llm(reg):
+    @tool(description="stats", registry=reg, speak_result=False)
+    def stats() -> ToolResult:
+        return ToolResult.ok("CPU 12%; RAM 40%")
+
+    llm = FakeLLM(calls(("stats", {})), text("Your PC is relaxed."))
+    assert make(llm, reg, quick=True).process("how is my pc").text == "Your PC is relaxed."
+
+
+@pytest.mark.parametrize("text, expected", [
+    ("volume thoda kam karo", True), ("notepad kholo", True), ("mujhe time batao", True),
+    ("सूज़ी समय बताओ", True), ("open notepad", False), ("what time is it", False),
+    ("do it", False), ("set volume to 30 and open chrome", False),
+])
+def test_looks_like_hinglish(text, expected):
+    from core.assistant import looks_like_hinglish
+
+    assert looks_like_hinglish(text) is expected

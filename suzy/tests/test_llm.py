@@ -234,7 +234,7 @@ class ScriptedProvider(BaseProvider):
         self.outcomes = list(outcomes)
         self.calls = 0
 
-    def _chat_with_model(self, model, messages, tools, system_prompt):
+    def _chat_with_model(self, model, messages, tools, system_prompt, options):
         self.calls += 1
         outcome = self.outcomes.pop(0)
         if isinstance(outcome, Exception):
@@ -443,3 +443,52 @@ def test_technical_summary_keeps_latest_error_per_provider():
     assert summary.startswith("groq: model_unavailable - model x does not exist; gemini: auth - yyy")
     assert summary.endswith("...")
     assert "Re-run the installer" in LLMUnavailableError([error.errors[1]]).user_message()
+
+
+# ============================================================================ rate-limit helpers
+@pytest.mark.parametrize("text, seconds", [
+    ("Please try again in 7.62s.", 7.62), ("try again in 1m7.5s", 67.5), ("try again in 450ms", 0.45),
+    ("Please try again in 2h3m", 7380.0), ("no hint here", None),
+])
+def test_parse_retry_after(text, seconds):
+    from core.llm import parse_retry_after
+
+    assert parse_retry_after(text) == (pytest.approx(seconds) if seconds is not None else None)
+
+
+def test_unavailable_retry_after_uses_shortest_rate_limit_wait():
+    error = LLMUnavailableError([
+        LLMError("groq", LLMErrorKind.RATE_LIMIT, "try again in 30s"),
+        LLMError("groq", LLMErrorKind.RATE_LIMIT, "try again in 12s"),
+        LLMError("gemini", LLMErrorKind.AUTH, "try again in 1s"),  # not a rate limit: ignored
+    ])
+    assert error.retry_after() == 12
+    assert LLMUnavailableError([LLMError("groq", LLMErrorKind.RATE_LIMIT, "429")]).retry_after() is None
+
+
+def test_rotate_to_other_model_on_rate_limit():
+    limited = _status_error(groq.RateLimitError, 429)
+
+    class Client(FakeGroqClient):
+        def _create(self, **kwargs):
+            self.calls.append(kwargs["model"])
+            if kwargs["model"] == "openai/gpt-oss-120b":
+                raise limited
+            return groq_reply("from 20b")
+
+    provider = GroqProvider(api_key="k", model=["openai/gpt-oss-120b", "openai/gpt-oss-20b"])
+    provider._client = Client()
+    # Normal chat: no rotation, the rate limit is reported.
+    with pytest.raises(LLMError):
+        provider.chat(CONVERSATION[:1], TOOLS, "S")
+    # Coding agent: rotates to the other model for this request only.
+    response = provider.chat(CONVERSATION[:1], TOOLS, "S", options={"rotate_on_rate_limit": True})
+    assert response.text == "from 20b" and provider.model == "openai/gpt-oss-120b"
+
+
+def test_rotation_gives_up_when_every_model_is_limited():
+    provider = make_groq(FakeGroqClient(error=_status_error(groq.RateLimitError, 429)))
+    provider.models = ["a", "b"]
+    with pytest.raises(LLMError) as info:
+        provider.chat(CONVERSATION[:1], TOOLS, "S", options={"rotate_on_rate_limit": True})
+    assert info.value.kind is LLMErrorKind.RATE_LIMIT

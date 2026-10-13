@@ -27,6 +27,12 @@ function Write-Step($text)  { Write-Host ""; Write-Host "==> $text" -ForegroundC
 function Write-Ok($text)    { Write-Host "    $text" -ForegroundColor Green }
 function Write-Note($text)  { Write-Host "    $text" -ForegroundColor Yellow }
 
+function Confirm-No($question) {
+    # Returns $true only if the user types y / yes.
+    $answer = Read-Host "    $question (y/N)"
+    return ($answer -match '^\s*(y|yes|haan|ha)\s*$')
+}
+
 function Confirm-Default($question) {
     # Returns $true unless the user types n / no.
     $answer = Read-Host "    $question (Y/n)"
@@ -101,16 +107,28 @@ function Read-EnvFile($path) {
     return $values
 }
 
-function Write-EnvFile($path, $groqKey, $geminiKey) {
-    $text = @(
-        '# Suzy API keys - keep this file private.',
-        '# Groq (primary brain): https://console.groq.com/keys',
-        "GROQ_API_KEY=$groqKey",
-        '',
-        '# Google Gemini (backup brain): https://aistudio.google.com/apikey',
-        "GEMINI_API_KEY=$geminiKey",
-        ''
-    ) -join "`r`n"
+function Write-EnvFile($path, $values) {
+    # Known keys with their comments, then every other entry already in the file (never lost).
+    $known = @(
+        @('GROQ_API_KEY', '# Groq (main brain + fast speech recognition): https://console.groq.com/keys'),
+        @('GEMINI_API_KEY', '# Google Gemini (backup brain): https://aistudio.google.com/apikey'),
+        @('OLLAMA_API_KEY', '# Ollama Cloud (optional brain): https://ollama.com/settings/keys')
+    )
+    $lines = @('# Suzy API keys - keep this file private.')
+    foreach ($entry in $known) {
+        $lines += ''
+        $lines += $entry[1]
+        $lines += "$($entry[0])=$($values[$entry[0]])"
+    }
+    $knownNames = $known | ForEach-Object { $_[0] }
+    $others = @($values.Keys | Where-Object { $knownNames -notcontains $_ } | Sort-Object)
+    if ($others.Count -gt 0) {
+        $lines += ''
+        $lines += '# Other settings'
+        foreach ($name in $others) { $lines += "$name=$($values[$name])" }
+    }
+    $lines += ''
+    $text = $lines -join "`r`n"
     # UTF-8 *without* BOM: a BOM would corrupt the first key name for python-dotenv.
     [IO.File]::WriteAllText($path, $text, (New-Object Text.UTF8Encoding $false))
 }
@@ -120,9 +138,10 @@ function Request-ApiKey($label, $url, $prefix) {
     Write-Host "    $label - free key at: $url" -ForegroundColor White
     if (Confirm-Default "Open that page in your browser now?") { Start-Process $url }
     # $prefix may list several accepted prefixes separated by " or ".
-    $key = (Read-Host "    Paste your $label key here (starts with $prefix), or just press Enter to skip").Trim().Trim('"').Trim("'")
+    $hint = if ($prefix) { " (starts with $prefix)" } else { "" }
+    $key = (Read-Host "    Paste your $label key here$hint, or just press Enter to skip").Trim().Trim('"').Trim("'")
     $known = @($prefix -split ' or ' | Where-Object { $key.StartsWith($_) })
-    if ($key -and $known.Count -eq 0) {
+    if ($key -and $prefix -and $known.Count -eq 0) {
         Write-Note "That doesn't start with $prefix - saving it anyway, double-check it if Suzy complains."
     }
     return $key
@@ -158,8 +177,15 @@ function Install-Suzy {
     if (-not (Test-Path (Join-Path $source 'main.py'))) { throw "The download did not contain Suzy's code." }
 
     New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-    # Copy everything except your private/local files (.env, config.yaml, venv, logs, data).
-    & robocopy $source $InstallDir /E /XD .venv data logs __pycache__ /XF .env config.yaml /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+    # Suzy may have changed her own code. This update replaces files it ships, so keep a
+    # full copy of her current code first. New abilities she added are never deleted.
+    if (Test-Path (Join-Path $InstallDir 'data\self_changes.jsonl')) {
+        $selfBackup = Join-Path $InstallDir ("backups\installer-update-" + (Get-Date -Format 'yyyyMMdd-HHmmss'))
+        & robocopy $InstallDir $selfBackup /E /XD .venv data logs models backups __pycache__ /XF .env /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
+        Write-Note "Suzy had changed her own code - saved a copy in $selfBackup before updating."
+    }
+    # Copy everything except your private/local files (.env, config.yaml, venv, logs, data, backups).
+    & robocopy $source $InstallDir /E /XD .venv data logs models backups __pycache__ /XF .env config.yaml /NFL /NDL /NJH /NJS /NP /R:1 /W:1 | Out-Null
     if ($LASTEXITCODE -ge 8) { throw "Copying Suzy's files failed (robocopy code $LASTEXITCODE)." }
     $configPath = Join-Path $InstallDir 'config.yaml'
     $newConfig = Join-Path $source 'config.yaml'
@@ -181,6 +207,16 @@ function Install-Suzy {
         Write-Ok "Updated config.yaml to the current AI models (old one saved as config.backup.yaml)."
     } else {
         Write-Ok "Kept your existing config.yaml."
+        # Move settings that still hold an OLD default to the new default (values you chose are kept).
+        $configText = [IO.File]::ReadAllText($configPath)
+        $migrated = $configText
+        $migrated = [regex]::Replace($migrated, '(?m)^(\s+voice:[ \t]*)en-IN-NeerjaNeural([ \t]+# also try[^\r\n]*)(?=\r?$)',
+            '${1}en-IN-NeerjaExpressiveNeural  # hear all voices: double-click "Suzy Voices"')
+        $migrated = [regex]::Replace($migrated, '(?m)^(\s+fallback_voice:[ \t]*)en-US-AriaNeural[ \t]*(?=\r?$)', '${1}en-IN-NeerjaNeural')
+        if ($migrated -ne $configText) {
+            [IO.File]::WriteAllText($configPath, $migrated, (New-Object Text.UTF8Encoding $false))
+            Write-Ok "Switched Suzy to the new, more natural Indian voice."
+        }
     }
     New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir 'logs'), (Join-Path $InstallDir 'data') | Out-Null
     Remove-Item $zip, $extract -Recurse -Force -ErrorAction SilentlyContinue
@@ -209,17 +245,26 @@ function Install-Suzy {
     # 4. API keys ----------------------------------------------------------
     Write-Step "Step 4/6: API keys (both are free, no credit card)"
     $envPath = Join-Path $InstallDir '.env'
-    $existing = Read-EnvFile $envPath
-    $groqKey = $existing['GROQ_API_KEY']
-    $geminiKey = $existing['GEMINI_API_KEY']
-    if ($groqKey -and $geminiKey) {
-        Write-Ok "Found your saved Groq and Gemini keys."
-        if (-not (Confirm-Default "Keep them?")) { $groqKey = ''; $geminiKey = '' }
+    $keys = Read-EnvFile $envPath
+    if ($keys['GROQ_API_KEY'] -and $keys['GEMINI_API_KEY']) {
+        Write-Ok "Found your saved keys."
+        if (-not (Confirm-Default "Keep them?")) { $keys['GROQ_API_KEY'] = ''; $keys['GEMINI_API_KEY'] = '' }
     }
-    if (-not $groqKey)   { $groqKey   = Request-ApiKey 'Groq (main brain)' 'https://console.groq.com/keys' 'gsk_' }
-    if (-not $geminiKey) { $geminiKey = Request-ApiKey 'Google Gemini (backup brain)' 'https://aistudio.google.com/apikey' 'AIza or AQ.' }
-    Write-EnvFile $envPath $groqKey $geminiKey
-    if (-not $groqKey -and -not $geminiKey) {
+    if (-not $keys['GROQ_API_KEY']) {
+        $keys['GROQ_API_KEY'] = Request-ApiKey 'Groq (main brain + fast listening)' 'https://console.groq.com/keys' 'gsk_'
+    }
+    if (-not $keys['GEMINI_API_KEY']) {
+        $keys['GEMINI_API_KEY'] = Request-ApiKey 'Google Gemini (backup brain)' 'https://aistudio.google.com/apikey' 'AIza or AQ.'
+    }
+    if ($keys['OLLAMA_API_KEY']) {
+        Write-Ok "Found your Ollama Cloud key too."
+    } elseif (Confirm-No "Do you also have an Ollama Cloud API key to add (optional)?") {
+        $keys['OLLAMA_API_KEY'] = Request-ApiKey 'Ollama Cloud (extra brain)' 'https://ollama.com/settings/keys' ''
+    }
+    $groqKey = $keys['GROQ_API_KEY']
+    $geminiKey = $keys['GEMINI_API_KEY']
+    Write-EnvFile $envPath $keys
+    if (-not $groqKey -and -not $geminiKey -and -not $keys['OLLAMA_API_KEY']) {
         Write-Note "No keys saved - Suzy can't think without one. Re-run this installer or edit $envPath later."
     } else {
         Write-Ok "Keys saved to $envPath"
@@ -240,11 +285,32 @@ function Install-Suzy {
         '@echo off',
         'title Suzy',
         'cd /d "%~dp0"',
-        '".venv\Scripts\python.exe" main.py %*',
+        'rem guard.py starts Suzy, restarts her after self-updates and rolls back broken ones.',
+        '".venv\Scripts\python.exe" guard.py %*',
         'echo.',
         'pause'
     ) -join "`r`n"
     [IO.File]::WriteAllText($launcher, $bat, (New-Object Text.ASCIIEncoding))
+    $micLauncher = Join-Path $InstallDir 'Suzy Mic Test.bat'
+    $micBat = @(
+        '@echo off',
+        'title Suzy microphone test',
+        'cd /d "%~dp0"',
+        '".venv\Scripts\python.exe" main.py --mic-test',
+        'echo.',
+        'pause'
+    ) -join "`r`n"
+    [IO.File]::WriteAllText($micLauncher, $micBat, (New-Object Text.ASCIIEncoding))
+    $voicesLauncher = Join-Path $InstallDir 'Suzy Voices.bat'
+    $voicesBat = @(
+        '@echo off',
+        'title Suzy voices',
+        'cd /d "%~dp0"',
+        '".venv\Scripts\python.exe" main.py --voices',
+        'echo.',
+        'pause'
+    ) -join "`r`n"
+    [IO.File]::WriteAllText($voicesLauncher, $voicesBat, (New-Object Text.ASCIIEncoding))
     try {
         $desktop = [Environment]::GetFolderPath('Desktop')
         $shell = New-Object -ComObject WScript.Shell
@@ -254,9 +320,43 @@ function Install-Suzy {
         $shortcut.IconLocation = "$venvPython,0"
         $shortcut.Description = 'Start Suzy, your AI assistant'
         $shortcut.Save()
-        Write-Ok "Desktop shortcut 'Suzy' created."
+        $micShortcut = $shell.CreateShortcut((Join-Path $desktop 'Suzy Mic Test.lnk'))
+        $micShortcut.TargetPath = $micLauncher
+        $micShortcut.WorkingDirectory = $InstallDir
+        $micShortcut.IconLocation = "$env:SystemRoot\System32\SndVol.exe,0"
+        $micShortcut.Description = 'Check that Suzy can hear your microphone'
+        $micShortcut.Save()
+        $voicesShortcut = $shell.CreateShortcut((Join-Path $desktop 'Suzy Voices.lnk'))
+        $voicesShortcut.TargetPath = $voicesLauncher
+        $voicesShortcut.WorkingDirectory = $InstallDir
+        $voicesShortcut.IconLocation = "$env:SystemRoot\System32\SndVol.exe,0"
+        $voicesShortcut.Description = "Listen to Suzy's voices and pick your favourite"
+        $voicesShortcut.Save()
+        Write-Ok "Desktop shortcuts 'Suzy', 'Suzy Mic Test' and 'Suzy Voices' created."
     } catch {
         Write-Note "Couldn't create the desktop shortcut; you can double-click '$launcher' instead."
+    }
+
+    # Start with Windows: a minimised shortcut in the Startup folder, run with --startup so
+    # Suzy greets "Hello <name>, welcome back."
+    $startupLink = Join-Path ([Environment]::GetFolderPath('Startup')) 'Suzy.lnk'
+    Write-Host ""
+    if (Confirm-Default "Start Suzy automatically when Windows starts (she'll say 'welcome back')?") {
+        try {
+            $autoShell = New-Object -ComObject WScript.Shell
+            $auto = $autoShell.CreateShortcut($startupLink)
+            $auto.TargetPath = $launcher
+            $auto.Arguments = '--startup'
+            $auto.WorkingDirectory = $InstallDir
+            $auto.WindowStyle = 7
+            $auto.Description = 'Start Suzy when Windows starts'
+            $auto.Save()
+            Write-Ok "Suzy will start with Windows and welcome you back."
+        } catch {
+            Write-Note "Couldn't add Suzy to Windows startup. You can ask her: 'Suzy, start with Windows'."
+        }
+    } else {
+        Remove-Item $startupLink -Force -ErrorAction SilentlyContinue
     }
 
     # Tidy up the leftovers from a manual attempt in the home folder.
@@ -280,7 +380,7 @@ function Install-Suzy {
     Write-Host ""
     if (Confirm-Default "Start Suzy now?") {
         Push-Location $InstallDir
-        & $venvPython main.py
+        & $venvPython guard.py
         Pop-Location
     }
 }

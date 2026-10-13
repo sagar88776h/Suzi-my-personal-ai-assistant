@@ -168,6 +168,7 @@ def _system_drive() -> str:
 @tool(
     description="Get a quick health report of the PC: CPU usage, RAM, battery, disk space and uptime.",
     category="system",
+    speak_result=False,  # raw numbers - let the brain summarise them like a person would
 )
 def get_system_info() -> ToolResult:
     data: dict[str, Any] = {}

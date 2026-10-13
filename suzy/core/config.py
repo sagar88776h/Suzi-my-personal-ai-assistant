@@ -14,6 +14,7 @@ from __future__ import annotations
 import copy
 import logging
 import os
+import re
 import threading
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "name": "Suzy",
         "max_context_turns": 20,   # conversation turns sent to the LLM
         "max_tool_rounds": 5,      # tool-call rounds allowed per request
+        "quick_replies": True,     # say simple action results directly (skips a 2nd AI call)
+        "startup_greeting": "Hello {name}, welcome back.",  # said when Suzy starts with Windows
     },
     "llm": {
         "provider": "groq",
@@ -46,10 +49,62 @@ DEFAULT_CONFIG: dict[str, Any] = {
             "models": ["openai/gpt-oss-120b", "openai/gpt-oss-20b"],
             "reasoning_effort": "low",   # gpt-oss only: low | medium | high
         },
+        "ollama": {
+            "host": "https://ollama.com",     # Ollama Cloud; "http://localhost:11434" for Ollama on this PC
+            "models": ["gpt-oss:120b", "gpt-oss:20b"],
+            "think": "low",                   # gpt-oss thinking effort: low | medium | high
+        },
         "gemini": {
             "models": ["gemini-flash-latest", "gemini-flash-lite-latest", "gemini-2.5-flash"],
             "thinking_budget": None,     # None = model default; 0 disables thinking on 2.5 models
         },
+    },
+    "voice": {
+        "enabled": True,             # microphone + push-to-talk
+        "hotkey": "ctrl+alt+s",      # works from any window
+        "input_device": None,        # None = Windows default mic; or part of a mic's name
+        "energy_threshold": 0.006,   # how loud counts as speech; lower = more sensitive
+        "max_record_seconds": 15,
+        "silence_seconds": 1.2,      # pause that ends what you're saying
+        "no_speech_timeout": 6,      # stop listening if you say nothing
+        "sound_cues": True,          # chime when listening starts/stops
+        "wake_word": {
+            "enabled": True,         # always listen for "Suzy" / "Hi Suzy" / "Hello Suzy"
+            "model": "tiny",         # Whisper model that checks for her name (tiny = fastest)
+            "followup_seconds": 8,   # after answering, the next request needs no wake word (0 = off)
+            "command_timeout": 6,    # after "Suzy", how long to wait for the request
+            "vad_threshold": 0.5,    # 0-1: higher = needs clearer speech (fewer false triggers)
+            "end_silence": 0.7,      # pause that ends a sentence
+        },
+    },
+    "tts": {
+        "enabled": True,
+        "voice": "en-IN-NeerjaExpressiveNeural",  # natural, expressive Indian female voice
+        "fallback_voice": "en-IN-NeerjaNeural",
+        "hindi_voice": "hi-IN-SwaraNeural",  # speaks replies containing Hindi (Devanagari) words
+        "rate": "+0%",               # speed, e.g. "+15%" faster, "-10%" slower
+        "pitch": "+0Hz",
+        "volume": "+0%",
+        "offline_fallback": True,    # Windows built-in voice when there's no internet
+    },
+    "stt": {
+        "engine": "groq",            # groq = fast cloud Whisper (free, same key); local = on this PC only
+        "cloud_model": "whisper-large-v3-turbo",
+        "model": "small",            # local model, also the backup when offline            # tiny | base | small | medium (bigger = slower, more accurate)
+        "device": "cpu",
+        "compute_type": "int8",
+        "language": None,            # None = auto (English/Hindi); "en" to force English
+        "allowed_languages": ["en", "hi"],
+        "beam_size": 1,              # 1 = fastest; 5 = a little more accurate
+        "models_dir": "models",
+    },
+    "self_improvement": {
+        "enabled": True,             # Suzy may change her own code (always asks before installing)
+        "auto_fix_errors": True,     # start fixing new errors from the log on her own (still asks to install)
+        "max_steps": 40,             # coding steps per change
+        "context_tokens": 4500,      # per-request size; fits Groq's free 8,000 tokens/minute
+        "max_output_tokens": 3000,
+        "keep_backups": 10,
     },
     "tools": {
         "apps": {
@@ -69,6 +124,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
 API_KEY_ENV_VARS: dict[str, tuple[str, ...]] = {
     "groq": ("GROQ_API_KEY",),
     "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY"),
+    "ollama": ("OLLAMA_API_KEY",),
 }
 
 
@@ -81,6 +137,45 @@ def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]
         else:
             merged[key] = copy.deepcopy(value)
     return merged
+
+
+_YAML_LINE = re.compile(r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_]+):(?P<rest>.*)$")
+
+
+def replace_yaml_value(text: str, keys: list[str], value: Any) -> str | None:
+    """Replace the value of ``a.b.c`` in YAML text, keeping indentation and the line's comment.
+
+    Returns None if the key isn't in the text (or holds a nested block).
+    """
+    stack: list[tuple[int, str]] = []
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        match = _YAML_LINE.match(line.rstrip("\r\n"))
+        if not match:
+            continue
+        indent = len(match["indent"])
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        stack.append((indent, match["key"]))
+        if [key for _indent, key in stack] != keys:
+            continue
+        rest = match["rest"]
+        comment_at = re.search(r"\s+#", rest)
+        old_value = rest[:comment_at.start()] if comment_at else rest
+        if not old_value.strip():
+            return None  # a nested section, not a single value
+        comment = rest[comment_at.start():] if comment_at else ""
+        dumped = yaml.safe_dump(value, default_flow_style=True, allow_unicode=True).strip()
+        dumped = dumped.removesuffix("\n...").removesuffix("...").strip()
+        new_value = f" {dumped}"
+        if comment:  # keep the comment roughly where it was
+            new_value = new_value.ljust(len(old_value))
+        ending = "\n" if line.endswith("\n") else ""
+        lines[index] = f"{match['indent']}{match['key']}:{new_value}{comment}{ending}"
+        return "".join(lines)
+    return None
 
 
 class Config:
@@ -150,6 +245,25 @@ class Config:
         with self._lock:
             text = yaml.safe_dump(self._data, sort_keys=False, allow_unicode=True)
         self._path.write_text(text, encoding="utf-8")
+
+    def persist(self, dotted_key: str, value: Any) -> None:
+        """Set a value and write just that line of config.yaml, keeping its comments.
+
+        Falls back to rewriting the whole file if the key isn't in it yet.
+        """
+        self.set(dotted_key, value)
+        if self._path is None:
+            return
+        with self._lock:
+            try:
+                text = self._path.read_text(encoding="utf-8")
+            except OSError:
+                text = ""
+            updated = replace_yaml_value(text, dotted_key.split("."), value)
+            if updated is None:
+                self.save()
+            else:
+                self._path.write_text(updated, encoding="utf-8")
 
     def as_dict(self) -> dict[str, Any]:
         with self._lock:

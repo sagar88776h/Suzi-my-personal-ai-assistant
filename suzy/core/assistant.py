@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -18,9 +19,26 @@ from typing import Any
 from core.config import Config
 from core.llm import LLMError, LLMRouter, LLMUnavailableError
 from core.prompts import build_system_prompt
+from tools import context as tool_context
 from tools.registry import ToolRegistry, ToolResult
 
 log = logging.getLogger("suzy.assistant")
+
+
+HINGLISH_WORDS = {
+    "karo", "kar", "kardo", "do", "hai", "hain", "kya", "kyun", "kaise", "mujhe", "mera", "meri", "thoda",
+    "zara", "band", "chalu", "kholo", "khol", "batao", "bata", "bolo", "suno", "aur", "nahi", "haan",
+    "kitna", "kitne", "kab", "kaha", "kahan", "yeh", "woh", "abhi", "jaldi", "accha", "achha", "chahiye",
+}
+
+
+def looks_like_hinglish(text: str) -> bool:
+    """True if the message has Devanagari or a couple of common Hindi words in Latin script."""
+    if any("ऀ" <= ch <= "ॿ" for ch in text):
+        return True
+    words = re.findall(r"[a-z]+", text.lower())
+    return sum(word in HINGLISH_WORDS for word in words) >= 2 or (len(words) <= 3 and any(
+        word in HINGLISH_WORDS - {"do"} for word in words))
 
 
 @dataclass
@@ -53,6 +71,8 @@ class Assistant:
         self.clock = clock
         self.history: list[dict[str, Any]] = []
         self._lock = threading.Lock()
+        # Extra live context for the system prompt (e.g. "an update is ready to install").
+        self.context_providers: list[Callable[[], str]] = []
 
     # ------------------------------------------------------------------ settings
     @property
@@ -64,11 +84,23 @@ class Assistant:
         return max(1, int(self.config.get("assistant.max_tool_rounds", 5)))
 
     def system_prompt(self) -> str:
-        return build_system_prompt(
+        prompt = build_system_prompt(
             assistant_name=self.config.get("assistant.name", "Suzy"),
             user_name=self.config.get("user.name", "Sagar"),
             now=self.clock(),
         )
+        extras = []
+        for provider in self.context_providers:
+            try:
+                text = provider()
+            except Exception:  # noqa: BLE001 - context is optional, never fatal
+                log.exception("Context provider failed")
+                continue
+            if text:
+                extras.append(f"- {text}")
+        if extras:
+            prompt += "\nCURRENT STATUS\n" + "\n".join(extras) + "\n"
+        return prompt
 
     # ------------------------------------------------------------------ public API
     def reset(self) -> None:
@@ -85,6 +117,7 @@ class Assistant:
         with self._lock:
             checkpoint = len(self.history)
             self.history.append({"role": "user", "content": text})
+            tool_context.set_user_message(text)
             actions: list[ActionRecord] = []
             try:
                 reply = self._run(actions)
@@ -103,7 +136,10 @@ class Assistant:
         provider: str | None = None
 
         for _round in range(self.max_tool_rounds):
-            response = self.llm.chat(self.history, tools, self.system_prompt())
+            # If the main model is at its free-tier limit (e.g. while Suzy is coding on
+            # herself), answer with another model instead of making Sagar wait.
+            response = self.llm.chat(self.history, tools, self.system_prompt(),
+                                     options={"rotate_on_rate_limit": True})
             provider = response.provider
 
             if not response.tool_calls:
@@ -126,16 +162,24 @@ class Assistant:
             assistant_message.update(response.message_extras)
             self.history.append(assistant_message)
 
+            round_actions = []
             for call in response.tool_calls:
                 log.info("Tool call: %s(%s)", call.name, call.arguments)
                 result = self.registry.execute(call.name, call.arguments)
-                actions.append(ActionRecord(call.name, call.arguments, result))
+                record = ActionRecord(call.name, call.arguments, result)
+                actions.append(record)
+                round_actions.append(record)
                 self.history.append({
                     "role": "tool",
                     "tool_call_id": call.id,
                     "name": call.name,
                     "content": json.dumps(result.to_llm_payload(), ensure_ascii=False, default=str),
                 })
+
+            quick = self._quick_reply(round_actions)
+            if quick is not None:
+                self.history.append({"role": "assistant", "content": quick})
+                return AssistantReply(quick, actions, provider)
 
         # Too many chained tool calls: stop and report what was done.
         log.warning("Reached max tool rounds (%d)", self.max_tool_rounds)
@@ -160,6 +204,24 @@ class Assistant:
                                   detail=exc.technical_summary() or None)
         message = "Oops, something went wrong on my side. Could you try that again?"
         return AssistantReply(message, [], None, error=True, detail="see logs/errors.log")
+
+    def _quick_reply(self, round_actions: list[ActionRecord]) -> str | None:
+        """Skip the second LLM call when the actions already produced the spoken answer.
+
+        "open notepad" -> the tool says "Opening Notepad." -> say that right away (about a
+        second faster). The LLM still writes the reply when an action failed (it may retry
+        or explain), when a tool returns information to be explained, or when Sagar spoke
+        Hinglish (the tools answer in English).
+        """
+        if not self.config.get("assistant.quick_replies", True) or not round_actions:
+            return None
+        for record in round_actions:
+            tool = self.registry.get(record.tool)
+            if tool is None or not tool.speak_result or not record.result.success or not record.result.message:
+                return None
+        if looks_like_hinglish(tool_context.user_message()):
+            return None
+        return " ".join(record.result.message for record in round_actions)
 
     @staticmethod
     def _summarize(actions: list[ActionRecord]) -> str:

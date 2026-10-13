@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -104,6 +105,12 @@ class LLMUnavailableError(Exception):
                     "to update me, or set a current model in config.yaml.")
         return "My brain is having trouble right now. Please try again in a moment."
 
+    def retry_after(self) -> float | None:
+        """Seconds until a rate limit resets, if the provider said so ("try again in 1m7.5s")."""
+        waits = [parse_retry_after(e.detail) for e in self.errors if e.kind is LLMErrorKind.RATE_LIMIT]
+        known = [w for w in waits if w is not None]
+        return min(known) if known else None
+
     def technical_summary(self, max_len: int = 160) -> str:
         """One short line per provider with the last error it reported."""
         latest: dict[str, LLMError] = {}
@@ -131,6 +138,20 @@ def _parse_arguments(raw: Any) -> dict[str, Any]:
         log.warning("Unparseable tool arguments: %r", raw)
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+_RETRY_AFTER = re.compile(r"try again in\s+((?:\d+h)?(?:\d+m(?!s))?(?:[\d.]+s)?(?:[\d.]+ms)?)", re.IGNORECASE)
+
+
+def parse_retry_after(text: str) -> float | None:
+    """Read "Please try again in 1m7.5s" / "in 450ms" from a rate-limit message, in seconds."""
+    match = _RETRY_AFTER.search(text or "")
+    if not match or not match.group(1):
+        return None
+    total = 0.0
+    for amount, unit in re.findall(r"([\d.]+)(ms|h|m|s)", match.group(1)):
+        total += float(amount) * {"h": 3600, "m": 60, "s": 1, "ms": 0.001}[unit]
+    return total
 
 
 def _public(message: dict[str, Any]) -> dict[str, Any]:
@@ -193,24 +214,48 @@ class BaseProvider(ABC):
         return bool(self.api_key)
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
-             system_prompt: str) -> LLMResponse:
-        """Send the conversation and return text and/or tool calls. Raises LLMError."""
+             system_prompt: str, options: dict[str, Any] | None = None) -> LLMResponse:
+        """Send the conversation and return text and/or tool calls. Raises LLMError.
+
+        ``options`` may override ``max_tokens`` and ``reasoning_effort`` for one call.
+        """
         if not self.is_configured:
             raise LLMError(self.name, LLMErrorKind.NOT_CONFIGURED, f"no API key set for {self.name}")
+        options = options or {}
         while True:
             model = self.model
             try:
-                return self._chat_with_model(model, messages, tools, system_prompt)
+                return self._chat_with_model(model, messages, tools, system_prompt, options)
             except LLMError as exc:
+                if exc.kind is LLMErrorKind.RATE_LIMIT and options.get("rotate_on_rate_limit"):
+                    response = self._try_other_models(model, messages, tools, system_prompt, options)
+                    if response is not None:
+                        return response
+                    raise
                 if exc.kind is not LLMErrorKind.MODEL_UNAVAILABLE or self._model_index + 1 >= len(self.models):
                     raise
                 self._model_index += 1
                 log.warning("%s model %s is unavailable (%s); switching to %s",
                             self.name, model, exc.detail[:200], self.model)
 
+    def _try_other_models(self, busy_model: str, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
+                          system_prompt: str, options: dict[str, Any]) -> LLMResponse | None:
+        """The free tier limits each model separately: when one is at its limit, try the others once."""
+        for model in self.models:
+            if model == busy_model:
+                continue
+            try:
+                log.info("%s is at its rate limit; trying %s for this request", busy_model, model)
+                return self._chat_with_model(model, messages, tools, system_prompt, options)
+            except LLMError as exc:
+                if exc.kind not in (LLMErrorKind.RATE_LIMIT, LLMErrorKind.MODEL_UNAVAILABLE):
+                    raise
+        return None
+
     @abstractmethod
     def _chat_with_model(self, model: str, messages: list[dict[str, Any]],
-                         tools: list[dict[str, Any]], system_prompt: str) -> LLMResponse:
+                         tools: list[dict[str, Any]], system_prompt: str,
+                         options: dict[str, Any]) -> LLMResponse:
         """Make one request with a specific model. Raises LLMError."""
 
 
@@ -263,8 +308,10 @@ class GroqProvider(BaseProvider):
             isinstance(exc, groq.BadRequestError) and _mentions_missing_model(str(exc))
         ):
             kind = LLMErrorKind.MODEL_UNAVAILABLE
-        elif isinstance(exc, (groq.BadRequestError, groq.UnprocessableEntityError)):
-            kind = LLMErrorKind.BAD_REQUEST
+        elif isinstance(exc, (groq.BadRequestError, groq.UnprocessableEntityError)) or (
+            isinstance(exc, groq.APIStatusError) and getattr(exc, "status_code", None) == 413
+        ):
+            kind = LLMErrorKind.BAD_REQUEST  # includes "request too large" (413)
         elif isinstance(exc, (ConnectionError, TimeoutError)):
             kind = LLMErrorKind.NETWORK
         else:
@@ -272,20 +319,22 @@ class GroqProvider(BaseProvider):
         return LLMError(self.name, kind, str(exc)[:500])
 
     def _chat_with_model(self, model: str, messages: list[dict[str, Any]],
-                         tools: list[dict[str, Any]], system_prompt: str) -> LLMResponse:
+                         tools: list[dict[str, Any]], system_prompt: str,
+                         options: dict[str, Any]) -> LLMResponse:
         client = self._get_client()
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": self.convert_messages(messages, system_prompt),
             "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "max_tokens": int(options.get("max_tokens", self.max_tokens)),
         }
         if tools:
             kwargs["tools"] = self.convert_tools(tools)
             kwargs["tool_choice"] = "auto"
-        if self.reasoning_effort and "gpt-oss" in model:
+        effort = options.get("reasoning_effort", self.reasoning_effort)
+        if effort and "gpt-oss" in model:
             # gpt-oss models "think" before answering; low effort keeps replies snappy.
-            kwargs["reasoning_effort"] = self.reasoning_effort
+            kwargs["reasoning_effort"] = effort
         try:
             completion = client.chat.completions.create(**kwargs)
         except Exception as exc:  # noqa: BLE001 - classified below
@@ -402,14 +451,15 @@ class GeminiProvider(BaseProvider):
         return LLMError(self.name, kind, text[:500])
 
     def _chat_with_model(self, model: str, messages: list[dict[str, Any]],
-                         tools: list[dict[str, Any]], system_prompt: str) -> LLMResponse:
+                         tools: list[dict[str, Any]], system_prompt: str,
+                         options: dict[str, Any]) -> LLMResponse:
         client = self._get_client()
         from google.genai import types
 
         config_kwargs: dict[str, Any] = {
             "system_instruction": system_prompt,
             "temperature": self.temperature,
-            "max_output_tokens": self.max_tokens,
+            "max_output_tokens": int(options.get("max_tokens", self.max_tokens)),
             "automatic_function_calling": types.AutomaticFunctionCallingConfig(disable=True),
         }
         if tools:
@@ -455,9 +505,109 @@ class GeminiProvider(BaseProvider):
         )
 
 
+class OllamaProvider(BaseProvider):
+    """Ollama's native chat API - Ollama Cloud (https://ollama.com, needs OLLAMA_API_KEY)
+    or a local Ollama on this PC (http://localhost:11434, no key)."""
+
+    name = "ollama"
+
+    def __init__(self, *args: Any, host: str = "https://ollama.com", think: str | None = "low",
+                 **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.host = host.rstrip("/")
+        self.think = think
+
+    @property
+    def is_local(self) -> bool:
+        return any(name in self.host for name in ("localhost", "127.0.0.1", "[::1]"))
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.api_key) or self.is_local
+
+    def _get_client(self) -> Any:
+        if self._client is None:
+            import httpx
+
+            self._client = httpx.Client(timeout=self.timeout)
+        return self._client
+
+    @staticmethod
+    def convert_messages(messages: list[dict[str, Any]], system_prompt: str) -> list[dict[str, Any]]:
+        converted: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+        for message in messages:
+            role = message.get("role")
+            if role == "user":
+                converted.append({"role": "user", "content": message.get("content") or ""})
+            elif role == "assistant":
+                item: dict[str, Any] = {"role": "assistant", "content": message.get("content") or ""}
+                calls = [{"function": {"name": call.get("function", {}).get("name"),
+                                       "arguments": _parse_arguments(call.get("function", {}).get("arguments"))}}
+                         for call in message.get("tool_calls") or []]
+                if calls:
+                    item["tool_calls"] = calls
+                converted.append(item)
+            elif role == "tool":
+                converted.append({"role": "tool", "content": message.get("content") or "",
+                                  "tool_name": message.get("name") or ""})
+        return converted
+
+    def _classify(self, status: int, body: str) -> LLMError:
+        lowered = body.lower()
+        if status in (401, 403):
+            kind = LLMErrorKind.AUTH
+        elif status == 429:
+            kind = LLMErrorKind.RATE_LIMIT
+        elif status == 404 or (status == 400 and _mentions_missing_model(lowered)):
+            kind = LLMErrorKind.MODEL_UNAVAILABLE
+        elif status >= 500:
+            kind = LLMErrorKind.SERVER
+        else:
+            kind = LLMErrorKind.BAD_REQUEST
+        return LLMError(self.name, kind, f"HTTP {status}: {body[:400]}")
+
+    def _chat_with_model(self, model: str, messages: list[dict[str, Any]],
+                         tools: list[dict[str, Any]], system_prompt: str,
+                         options: dict[str, Any]) -> LLMResponse:
+        import httpx
+
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": self.convert_messages(messages, system_prompt),
+            "stream": False,
+            "options": {"temperature": self.temperature,
+                        "num_predict": int(options.get("max_tokens", self.max_tokens))},
+        }
+        if tools:
+            body["tools"] = [{"type": "function", "function": t} for t in tools]
+        effort = options.get("reasoning_effort", self.think)
+        if effort and "gpt-oss" in model:
+            body["think"] = effort  # gpt-oss: low / medium / high
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        try:
+            response = self._get_client().post(f"{self.host}/api/chat", json=body, headers=headers)
+        except (httpx.TransportError, OSError) as exc:
+            hint = " (is Ollama running on this PC?)" if self.is_local else ""
+            raise LLMError(self.name, LLMErrorKind.NETWORK, f"{exc}{hint}") from exc
+        if response.status_code >= 400:
+            raise self._classify(response.status_code, response.text)
+        try:
+            message = response.json().get("message") or {}
+        except ValueError as exc:
+            raise LLMError(self.name, LLMErrorKind.UNKNOWN, "Ollama sent a reply I couldn't read") from exc
+        calls = []
+        for call in message.get("tool_calls") or []:
+            function = call.get("function") or {}
+            calls.append(ToolCall(id=call.get("id") or f"call_{uuid.uuid4().hex[:12]}",
+                                  name=function.get("name") or "",
+                                  arguments=_parse_arguments(function.get("arguments"))))
+        return LLMResponse(text=(message.get("content") or "").strip(), tool_calls=calls, provider=self.name)
+
+
 PROVIDER_CLASSES: dict[str, type[BaseProvider]] = {
     "groq": GroqProvider,
     "gemini": GeminiProvider,
+    "ollama": OllamaProvider,
 }
 
 
@@ -485,6 +635,9 @@ def build_provider(name: str, config: Config) -> BaseProvider:
         return GeminiProvider(thinking_budget=config.get("llm.gemini.thinking_budget"), **common)
     if cls is GroqProvider:
         return GroqProvider(reasoning_effort=config.get("llm.groq.reasoning_effort", "low"), **common)
+    if cls is OllamaProvider:
+        return OllamaProvider(host=str(config.get("llm.ollama.host", "https://ollama.com")),
+                              think=config.get("llm.ollama.think", "low"), **common)
     return cls(**common)
 
 
@@ -511,6 +664,10 @@ class ProviderStatus:
             LLMErrorKind.BAD_REQUEST: "the request was refused",
             LLMErrorKind.UNKNOWN: "unexpected error",
         }
+        if self.error.kind is LLMErrorKind.AUTH and "ACCESS_TOKEN_TYPE_UNSUPPORTED" in self.error.detail:
+            # Google currently refuses many new-format "AQ." Gemini keys; nothing the user can fix.
+            return ("NOT working - Google is refusing new 'AQ.' keys right now "
+                    "(a Google-side issue, not your setup)")
         return f"NOT working - {reasons[self.error.kind]}"
 
 
@@ -530,9 +687,13 @@ class LLMRouter:
 
     @classmethod
     def from_config(cls, config: Config) -> LLMRouter:
+        """Providers in config order (provider, then fallback_provider - a name or a list),
+        followed by any other provider that has a key, so adding a key is enough to use it."""
         order: list[str] = []
-        for key in ("llm.provider", "llm.fallback_provider"):
-            name = str(config.get(key) or "").strip().lower()
+        fallback = config.get("llm.fallback_provider")
+        names = [config.get("llm.provider")] + (fallback if isinstance(fallback, list) else [fallback])
+        for value in names:
+            name = str(value or "").strip().lower()
             if name and name not in order:
                 order.append(name)
         providers = []
@@ -541,6 +702,11 @@ class LLMRouter:
                 providers.append(build_provider(name, config))
             except ValueError as exc:
                 log.error("%s", exc)
+        for name in PROVIDER_CLASSES:
+            if name not in order:
+                extra = build_provider(name, config)
+                if extra.is_configured:
+                    providers.append(extra)
         return cls(providers)
 
     @property
@@ -553,14 +719,14 @@ class LLMRouter:
         return healthy + broken
 
     def chat(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]],
-             system_prompt: str) -> LLMResponse:
+             system_prompt: str, options: dict[str, Any] | None = None) -> LLMResponse:
         errors: list[LLMError] = []
         for provider in self._ordered_providers():
             attempts = 2  # first try + one retry
             for attempt in range(1, attempts + 1):
                 try:
                     started = time.perf_counter()
-                    response = provider.chat(messages, tools, system_prompt)
+                    response = provider.chat(messages, tools, system_prompt, options)
                     log.debug("%s answered in %.2fs (%d tool calls)", provider.name,
                               time.perf_counter() - started, len(response.tool_calls))
                     self.last_provider = provider.name
