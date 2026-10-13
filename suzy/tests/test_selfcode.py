@@ -341,6 +341,8 @@ def wait_for(manager, status, timeout=5):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if manager.job and manager.job.status == status:
+            if manager._thread and manager._thread.is_alive():
+                manager._thread.join(timeout=0.5)
             return
         time.sleep(0.02)
     raise AssertionError(f"job status is {manager.job.status if manager.job else None}, wanted {status}")

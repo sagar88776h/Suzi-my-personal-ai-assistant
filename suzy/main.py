@@ -105,7 +105,15 @@ def build_assistant(config: Config) -> tuple[Assistant, LLMRouter, ToolRegistry]
     apps.prewarm_index()
     win32.TRACKER.start()  # remembers the window Sagar uses, so "close this window" never closes Suzy
     router = LLMRouter.from_config(config)
-    return Assistant(config, router, registry), router, registry
+    assistant = Assistant(config, router, registry)
+
+    from core.memory import get_memory_store
+    from core.moods import get_mood_instructions
+
+    assistant.context_providers.append(lambda: get_memory_store().get_context_summary())
+    assistant.context_providers.append(lambda: get_mood_instructions())
+
+    return assistant, router, registry
 
 
 @dataclass
@@ -634,6 +642,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mic-test", action="store_true", help="test the microphone and exit")
     parser.add_argument("--voices", action="store_true", help="listen to the voice options and pick one")
     parser.add_argument("--startup", action="store_true", help="started with Windows: say 'welcome back'")
+    parser.add_argument("--ui", action="store_true", help="launch the Siri-level web & voice interface in your browser")
     args = parser.parse_args(argv)
 
     _configure_console()
@@ -657,6 +666,19 @@ def main(argv: list[str] | None = None) -> int:
         log.exception("Startup failed")
         print("Suzy: Something went wrong while starting up. Details are in logs/errors.log.")
         return 1
+
+    if args.ui:
+        import webbrowser
+        from web_server import SuzyWebServer
+        port = int(config.get("server.port", 8000))
+        server = SuzyWebServer(assistant, router, registry, config, port=port)
+        print(f"Suzy: Opening Siri interface at http://127.0.0.1:{port}")
+        try:
+            webbrowser.open(f"http://127.0.0.1:{port}")
+        except Exception:
+            pass
+        server.run()
+        return 0
 
     for problem in startup_report(config, router):
         print(f"Suzy: Heads up - {problem}")

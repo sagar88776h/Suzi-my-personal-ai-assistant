@@ -104,7 +104,7 @@ def test_brain_check_output(capsys):
 
 
 def test_check_flag_exit_code(monkeypatch, capsys):
-    for var in ("GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+    for var in ("GROQ_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OLLAMA_API_KEY"):
         monkeypatch.setenv(var, "")
     assert main.main(["--check"]) == 1
 
